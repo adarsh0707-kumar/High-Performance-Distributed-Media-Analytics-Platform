@@ -1,10 +1,13 @@
-# 03 — Data Model & Database Design
+# High-Performance Distributed Media Analytics Platform
 
-**Project:** High-Performance Distributed Media Analytics Platform
-**Author:** Adarsh Kumar
-**Database:** PostgreSQL
-**Document Status:** Architecture / Implementation Ready
+# Data Model & Database Design
+
+**Document:** `03-data-model.md`
 **Version:** 1.0
+**Status:** Draft / Implementation Ready
+**Database:** PostgreSQL
+**Author:** Adarsh Kumar
+**Last Updated:** 2026-09-07
 
 ---
 
@@ -12,131 +15,135 @@
 
 This document defines the persistent data model for the High-Performance Distributed Media Analytics Platform.
 
-PostgreSQL stores:
+PostgreSQL acts as the system's **control-plane database**.
 
-* User accounts
-* Media metadata
-* Uploaded media assets
-* Processing jobs
-* Job dependencies
-* Job execution history
-* Processing artifacts
-* Video/audio metadata
-* Transcripts
-* Transcript segments
-* Face/object detections
-* Video scenes
-* Generated clips
+It stores:
+
+* users
+* authentication sessions
+* media metadata
+* media assets
+* processing jobs
+* job dependencies
+* job attempts
+* job events
+* processing manifests
+* processing results
+* transcripts
+* transcript segments
+* detections
+* scenes
+* generated clips
 * AI insights
-* Worker execution information
-* Audit information
+* worker registration and health
+* audit events
+* reliable outbound events
 
-Large binary files such as:
-
-* Original videos
-* Original audio
-* Extracted audio
-* Thumbnails
-* Generated clips
-* Intermediate media
-
-are **not stored directly in PostgreSQL**.
+Large binary objects such as videos, audio files, thumbnails, waveform files and generated media are **not stored directly in PostgreSQL**.
 
 They are stored in object storage.
 
-PostgreSQL stores metadata and references to those objects.
+```text
+                    ┌──────────────────────┐
+                    │      PostgreSQL      │
+                    │                      │
+                    │ Users                │
+                    │ Media                │
+                    │ Jobs                 │
+                    │ Job Attempts         │
+                    │ Results              │
+                    │ Transcripts          │
+                    │ Detections           │
+                    │ Scenes               │
+                    │ Clips                │
+                    │ Workers              │
+                    │ Audit                │
+                    └──────────┬───────────┘
+                               │
+                       metadata/reference
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │    Object Storage    │
+                    │                      │
+                    │ Original Video       │
+                    │ Audio                │
+                    │ Proxy                │
+                    │ Thumbnail             │
+                    │ Waveform              │
+                    │ Clips                 │
+                    │ Subtitles             │
+                    └──────────────────────┘
+```
 
 ---
 
 # 2. Database Design Principles
 
-The database follows these principles:
+The database follows these principles.
 
-1. PostgreSQL is the source of truth for application metadata.
-2. Object storage is the source of truth for media binaries.
-3. Redis is used for asynchronous job delivery.
-4. Workers never become the authoritative source of job state.
-5. Jobs are idempotent whenever practical.
-6. Every important state transition is auditable.
-7. Timestamps are stored in UTC.
-8. Foreign keys enforce relational integrity.
-9. Frequently queried fields receive indexes.
-10. JSONB is used only for flexible metadata, not core relational data.
-11. Large binary objects are never stored as PostgreSQL BLOBs.
-12. Application IDs should preferably use UUIDv7.
-13. Database migrations are version-controlled.
-14. Deleting a user or media item must not accidentally delete unrelated data.
-15. Processing history should remain inspectable for debugging.
+## 2.1 PostgreSQL is the source of truth
+
+Redis is used for asynchronous job coordination.
+
+PostgreSQL remains the authoritative source for:
+
+* job state
+* ownership
+* media metadata
+* processing results
+* audit history
+* worker state
+
+A Redis message must never become the only record of a job.
 
 ---
 
-# 3. High-Level Entity Model
+# 2.2 Binary data is external
+
+Do not store:
 
 ```text
-                         ┌─────────────────┐
-                         │     users       │
-                         └────────┬────────┘
-                                  │
-                                  │ 1:N
-                                  ▼
-                         ┌─────────────────┐
-                         │     media       │
-                         └────────┬────────┘
-                                  │
-                         ┌────────┴─────────┐
-                         │                  │
-                         ▼                  ▼
-                ┌────────────────┐  ┌────────────────┐
-                │ media_assets   │  │     jobs       │
-                └────────────────┘  └───────┬────────┘
-                                            │
-                                  ┌─────────┴──────────┐
-                                  │                    │
-                                  ▼                    ▼
-                         ┌─────────────────┐  ┌─────────────────┐
-                         │   job_events    │  │ processing_    │
-                         │                 │  │    results     │
-                         └─────────────────┘  └────────┬────────┘
-                                                      │
-                       ┌──────────────┬────────────────┼───────────────┐
-                       │              │                │               │
-                       ▼              ▼                ▼               ▼
-                transcripts      detections         scenes          clips
-                       │
-                       ▼
-                transcript_segments
+video bytes
+audio bytes
+thumbnail bytes
+large model files
+generated clips
+```
 
-                                  processing_results
-                                          │
-                                          ▼
-                                  ai_insights
+inside PostgreSQL.
+
+Instead:
+
+```text
+PostgreSQL
+    │
+    └── bucket + object_key
+                    │
+                    ▼
+              Object Storage
 ```
 
 ---
 
-# 4. Identifier Strategy
+# 2.3 UUID primary keys
 
-## 4.1 Primary Key
+Entities use UUID identifiers.
 
-All major entities use PostgreSQL's `uuid` type.
+This provides:
 
-Recommended application-level generation:
+* globally unique identifiers
+* safe distributed creation
+* easier service separation
+* reduced dependency on database sequences
 
-```text
-UUIDv7
-```
+The DDL uses PostgreSQL's `gen_random_uuid()` for portability.
 
-UUIDv7 is preferable for new systems because its time-ordered structure can provide better index locality than randomly generated UUIDv4 values.
-
-However, the database schema does not depend on a PostgreSQL-specific UUIDv7 generation extension.
-
-The application may generate UUIDv7 values and insert them into PostgreSQL.
-
-For development, UUIDv4 generation through PostgreSQL's `pgcrypto` extension is sufficient.
+The application can later generate UUIDv7 identifiers if time-sortable IDs are desired.
 
 ---
 
-# 5. Timestamp Strategy
+# 2.4 Timestamps
 
 All timestamps use:
 
@@ -144,754 +151,802 @@ All timestamps use:
 TIMESTAMPTZ
 ```
 
-Never use:
+Never use application-local timestamps for persisted events.
+
+The database stores UTC timestamps.
+
+---
+
+# 2.5 JSONB for extensibility
+
+Structured information that changes frequently between algorithms is stored using:
 
 ```sql
-TIMESTAMP
+JSONB
 ```
 
-for application event timestamps.
-
-Example:
-
-```sql
-created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-```
-
-The application should treat all persisted timestamps as UTC.
-
----
-
-# 6. PostgreSQL Extensions
-
-The database uses:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-```
-
-This provides UUID generation functions such as:
-
-```sql
-gen_random_uuid()
-```
-
-UUIDv7 can still be generated by the application.
-
----
-
-# 7. Enumerated Values
-
-The application contains several finite state machines.
-
-These are represented using PostgreSQL enums.
-
----
-
-## 7.1 User Status
+Examples:
 
 ```text
-active
-suspended
-deleted
+model parameters
+FFmpeg metadata
+AI output
+worker capabilities
+algorithm-specific metadata
+processing options
 ```
+
+Frequently queried business data remains normalized.
 
 ---
 
-## 7.2 Media Status
+# 2.6 Immutable processing history
+
+Processing history should not be destroyed when a new processing run occurs.
+
+For example:
 
 ```text
-uploading
-uploaded
-processing
-ready
-failed
-deleted
+Job #1 → failed
+Job #2 → succeeded
+Job #3 → succeeded
 ```
+
+All three jobs remain available for debugging and audit.
 
 ---
 
-## 7.3 Asset Type
+# 3. Logical Entity Model
+
+The major entities are:
 
 ```text
-original
-proxy
-thumbnail
-audio
-clip
-subtitle
-intermediate
+User
+ │
+ ├── Sessions
+ │
+ └── Media
+       │
+       ├── Media Assets
+       │
+       ├── Jobs
+       │     │
+       │     ├── Dependencies
+       │     ├── Attempts
+       │     ├── Events
+       │     ├── Results
+       │     └── Manifest
+       │
+       ├── Transcripts
+       │     └── Transcript Segments
+       │
+       ├── Detections
+       │
+       ├── Scenes
+       │
+       ├── Clips
+       │
+       └── AI Insights
+
+
+Workers
+ │
+ └── Job Attempts
+
+
+Audit Logs
+Outbox Events
 ```
 
 ---
 
-## 7.4 Job Type
+# 4. Entity Inventory
 
-```text
-media_probe
-thumbnail_generation
-audio_extraction
-video_clip
-audio_downmix
-transcription
-face_detection
-object_detection
-scene_detection
-sentiment_analysis
-ai_summary
-```
-
----
-
-## 7.5 Job Status
-
-```text
-queued
-running
-succeeded
-failed
-cancelled
-retrying
-```
+| Entity                 | Purpose                          |
+| ---------------------- | -------------------------------- |
+| `users`                | Application users                |
+| `user_sessions`        | Refresh/session management       |
+| `media`                | Logical media records            |
+| `media_assets`         | Physical files in object storage |
+| `jobs`                 | Processing tasks                 |
+| `job_dependencies`     | Job dependency graph             |
+| `job_attempts`         | Individual worker attempts       |
+| `job_events`           | Immutable job lifecycle events   |
+| `processing_manifests` | C++/Python processing contract   |
+| `processing_results`   | Generic processing result        |
+| `transcripts`          | Audio transcription results      |
+| `transcript_segments`  | Timestamped transcript chunks    |
+| `detections`           | Faces/objects/entities detected  |
+| `scenes`               | Video scene boundaries           |
+| `clips`                | Generated video clips            |
+| `ai_insights`          | AI-generated analysis            |
+| `workers`              | Worker registration              |
+| `audit_logs`           | Security/business audit trail    |
+| `outbox_events`        | Reliable event publication       |
 
 ---
 
-## 7.6 Job Priority
+# 5. Users
 
-```text
-low
-normal
-high
-critical
-```
+## 5.1 Purpose
 
----
-
-## 7.7 Artifact Type
-
-```text
-metadata
-thumbnail
-audio
-clip
-transcript
-detection
-scene
-subtitle
-analysis
-```
-
----
-
-## 7.8 Worker Type
-
-```text
-cpp
-python
-node
-```
-
----
-
-## 7.9 Worker Status
-
-```text
-online
-busy
-offline
-draining
-```
-
----
-
-# 8. Users
-
-The `users` table represents authenticated platform users.
+The `users` table represents authenticated application users.
 
 ```text
 users
- ├── id
- ├── email
- ├── password_hash
- ├── display_name
- ├── status
- ├── created_at
- ├── updated_at
- └── deleted_at
+  │
+  ├── media
+  ├── sessions
+  └── audit_logs
 ```
 
-Passwords are never stored in plaintext.
+Important rule:
 
-Only password hashes are persisted.
+**Never store plaintext passwords.**
+
+Only password hashes are stored.
 
 ---
 
-# 9. Media
+# 6. User Sessions
 
-The `media` table represents a logical media item.
+`user_sessions` stores server-side session/refresh-token metadata.
 
-A media item may have multiple physical assets.
+A token itself should not be stored.
+
+Instead:
+
+```text
+refresh token
+       │
+       ▼
+SHA-256 / secure hash
+       │
+       ▼
+token_hash
+```
+
+This means a database compromise does not directly expose active refresh tokens.
+
+---
+
+# 7. Media
+
+`media` represents the logical media object.
 
 Example:
 
 ```text
-media
- └── original.mp4
- └── thumbnail.jpg
- └── extracted.wav
- └── clip-001.mp4
- └── clip-002.mp4
- └── transcript.json
+Media
+├── title
+├── original filename
+├── media type
+├── duration
+├── resolution
+├── codec information
+└── metadata
 ```
 
-The `media` record represents the logical project asset.
+It does **not** contain the actual video bytes.
 
 ---
 
-# 10. Media Assets
+# 8. Media Assets
 
-`media_assets` represents physical objects stored in object storage.
+A single logical media object can have multiple physical assets.
 
 Example:
 
 ```text
-media_assets
+Media
+ │
  ├── original.mp4
- ├── thumbnail.jpg
+ ├── proxy.mp4
  ├── audio.wav
- └── generated_clip.mp4
+ ├── thumbnail.jpg
+ ├── waveform.json
+ └── subtitles.vtt
 ```
 
-Each asset contains:
+Each physical object is represented by `media_assets`.
 
-* Object storage key
-* MIME type
-* Size
-* Checksum
-* Width
-* Height
-* Duration
-* Codec
-* Container
-* Metadata
-
----
-
-# 11. Jobs
-
-Jobs represent asynchronous processing tasks.
-
-Example:
+Asset types include:
 
 ```text
-media_probe
-     │
-     ├── thumbnail_generation
-     │
-     ├── audio_extraction
-     │       │
-     │       └── transcription
-     │
-     ├── scene_detection
-     │
-     └── face_detection
+source
+proxy
+audio
+thumbnail
+waveform
+clip
+subtitle
+manifest
+other
 ```
-
-Each job belongs to a media item.
-
-Jobs can also have parent jobs.
-
-This allows dependency graphs.
 
 ---
 
-# 12. Job Dependencies
+# 9. Jobs
 
-The `jobs.parent_job_id` field allows hierarchical job relationships.
+A job represents one asynchronous processing operation.
 
-Example:
+Examples:
 
 ```text
-Job A
-media_probe
-    │
-    ├── Job B
-    │   thumbnail_generation
-    │
-    ├── Job C
-    │   audio_extraction
-    │       │
-    │       └── Job D
-    │           transcription
-    │
-    └── Job E
-        face_detection
+MEDIA_PROBE
+VIDEO_TRANSCODE
+AUDIO_EXTRACT
+THUMBNAIL_GENERATE
+SCENE_DETECT
+FACE_DETECT
+TRANSCRIBE
+SENTIMENT_ANALYSIS
+SUMMARY
+CLIP_GENERATE
 ```
 
----
-
-# 13. Job Events
-
-A job's current status tells us its current state.
-
-`job_events` tells us **how it got there**.
-
-Example:
+Job state:
 
 ```text
 queued
-   ↓
+   │
+   ▼
+leased
+   │
+   ▼
+running
+   │
+ ┌─┴─────────────┐
+ ▼               ▼
+succeeded       failed
+                 │
+                 ▼
+          retry / dead_letter
+```
+
+Jobs contain:
+
+* priority
+* retry information
+* lease information
+* worker assignment
+* input parameters
+* output information
+* error information
+* correlation ID
+
+---
+
+# 10. Job Dependencies
+
+Some processing operations require previous operations.
+
+Example:
+
+```text
+MEDIA_PROBE
+     │
+     ├──────────────┐
+     ▼              ▼
+AUDIO_EXTRACT    THUMBNAIL
+     │
+     ▼
+TRANSCRIBE
+     │
+     ▼
+SUMMARY
+```
+
+`job_dependencies` represents this graph.
+
+A dependency means:
+
+```text
+prerequisite_job
+       │
+       ▼
+dependent_job
+```
+
+---
+
+# 11. Job Attempts
+
+A job can execute multiple times.
+
+Example:
+
+```text
+Job #100
+
+Attempt 1 → C++ worker → timeout
+Attempt 2 → C++ worker → crash
+Attempt 3 → C++ worker → success
+```
+
+The `jobs.attempt_count` field provides the current aggregate.
+
+`job_attempts` stores the detailed history.
+
+---
+
+# 12. Job Events
+
+`job_events` is an append-only lifecycle history.
+
+Example:
+
+```text
+created
+queued
+leased
 started
-   ↓
 progress
-   ↓
-progress
-   ↓
+completed
 failed
-   ↓
-retry
-   ↓
-started
-   ↓
-succeeded
+retried
+cancelled
 ```
 
 This is useful for:
 
-* Debugging
-* Monitoring
-* Analytics
-* Audit trails
-* Retry analysis
-* UI progress history
+* debugging
+* audit
+* WebSocket updates
+* monitoring
+* timeline visualization
+
+---
+
+# 13. Processing Manifest
+
+The processing manifest is the contract between workers.
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "media": {
+    "duration_ms": 124500,
+    "width": 1920,
+    "height": 1080
+  },
+  "input": {
+    "bucket": "media",
+    "object_key": "media/123/source.mp4"
+  },
+  "outputs": [
+    "audio",
+    "thumbnail",
+    "proxy"
+  ]
+}
+```
+
+The manifest allows C++ and Python services to communicate without sharing process memory.
 
 ---
 
 # 14. Processing Results
 
-The `processing_results` table represents the output of a successful processing stage.
+`processing_results` provides a generic result envelope.
+
+Specialized results are stored in dedicated tables.
 
 Example:
 
 ```text
-media_probe
-      ↓
 processing_results
-      ↓
-video metadata
-```
-
-Another example:
-
-```text
-transcription
-      ↓
-processing_results
-      ↓
-transcript
+       │
+       ├── transcript
+       ├── detection
+       ├── scene
+       ├── clip
+       └── AI insight
 ```
 
 ---
 
 # 15. Transcripts
 
-A transcript belongs to a media item.
+A transcript represents one transcription run.
 
-The transcript can contain:
+Fields include:
 
-* Language
-* Provider/model
-* Confidence
-* Full text
-* Processing metadata
-
-Individual spoken segments are stored separately.
+* language
+* model
+* full text
+* confidence
+* processing job
+* creation timestamp
 
 ---
 
 # 16. Transcript Segments
 
-A transcript may contain thousands of segments.
+A transcript is divided into timestamped segments.
 
 Example:
 
 ```text
-00:00.000 → 00:03.200
-"Hello everyone"
+00:00.000 ───────── 00:04.200
+"Welcome to the platform."
 
-00:03.200 → 00:06.500
-"Welcome to the platform"
+00:04.200 ───────── 00:08.500
+"Today we will analyze this video."
 ```
 
-Each segment contains:
+Each segment can contain:
 
-* Start time
-* End time
-* Text
-* Confidence
-* Speaker identifier
-
-Indexes allow efficient timeline queries.
+* start time
+* end time
+* text
+* speaker
+* confidence
+* word-level information
 
 ---
 
 # 17. Detections
 
-The detection model supports computer vision results.
-
-Examples:
+The detection model supports:
 
 ```text
 face
 person
-car
-dog
 object
+logo
+vehicle
+animal
+custom
 ```
 
 Each detection can contain:
 
-* Label
-* Confidence
-* Bounding box
-* Start time
-* End time
-* Frame number
-* Tracking ID
-
-Bounding box coordinates are normalized between `0` and `1`.
-
-Example:
-
 ```text
-x = 0.25
-y = 0.10
-width = 0.20
-height = 0.35
+label
+confidence
+timestamp
+frame number
+bounding box
+track ID
+attributes
 ```
+
+Bounding box coordinates are normalized or represented relative to the source frame.
 
 ---
 
 # 18. Scenes
 
-A scene represents a continuous section of a video.
+Scenes represent detected video segments.
 
 Example:
 
 ```text
+Scene 0
+00:00 → 00:12
+
 Scene 1
-00:00 → 00:14
+00:12 → 00:38
 
 Scene 2
-00:14 → 00:38
-
-Scene 3
-00:38 → 01:02
+00:38 → 01:04
 ```
 
-Scene detection can be generated by C++ or Python processing.
+Scene boundaries can be generated by C++ processing or an AI model.
 
 ---
 
 # 19. Clips
 
-A clip represents an extracted portion of a media item.
+A clip represents a selected or generated portion of media.
 
 Example:
 
 ```text
-Original:
-00:00 ─────────────────────────── 10:00
+Original
+00:00 ───────────────────────── 10:00
 
-Clip:
-             02:14 ───── 02:47
+Clip
+         02:10 ───── 02:48
 ```
 
-The resulting physical file is represented through `media_assets`.
+The resulting physical clip is represented using `media_assets`.
 
 ---
 
 # 20. AI Insights
 
-AI-generated results belong in `ai_insights`.
+AI insights are intentionally flexible.
 
-Examples:
+Supported types can include:
 
 ```text
 summary
 sentiment
 keywords
 topics
-emotion
+moderation
 classification
+embedding
+speaker_analysis
 ```
 
-Flexible AI-specific information can be stored in JSONB.
+The actual model output is stored as JSONB.
 
 ---
 
 # 21. Workers
 
-Workers represent processing infrastructure.
-
-A worker may be:
-
-```text
-cpp-worker-01
-python-worker-01
-python-worker-02
-```
-
-Workers periodically send heartbeats.
-
-This allows the system to identify stale workers.
-
----
-
-# 22. Worker Heartbeats
-
-Worker heartbeats contain:
-
-* Worker ID
-* Timestamp
-* Current job
-* CPU information
-* Memory information
-* Metadata
-
-A worker is considered stale when its heartbeat exceeds the configured timeout.
-
----
-
-# 23. Processing Manifests
-
-A processing manifest describes what a processing job produced.
+Workers register themselves in PostgreSQL.
 
 Example:
 
-```json
-{
-  "job_id": "...",
-  "media_id": "...",
-  "artifacts": [
-    {
-      "type": "thumbnail",
-      "storage_key": "media/.../thumbnail.jpg"
-    },
-    {
-      "type": "audio",
-      "storage_key": "media/.../audio.wav"
-    }
-  ]
-}
+```text
+worker-cpp-01
+worker-cpp-02
+worker-python-01
+worker-python-02
 ```
 
-The manifest can be stored as JSONB while important relationships remain normalized.
+Worker metadata includes:
+
+* worker type
+* version
+* hostname
+* capabilities
+* status
+* heartbeat
+* startup time
 
 ---
 
-# 24. Complete PostgreSQL DDL
+# 22. Worker Lifecycle
 
-The following SQL is intended to be executable as a database initialization/migration script.
+```text
+offline
+   │
+   ▼
+online
+   │
+   ▼
+draining
+   │
+   ▼
+offline
+```
+
+A worker that stops sending heartbeats can be considered unhealthy.
+
+---
+
+# 23. Audit Logs
+
+Audit logs track security-sensitive and business-sensitive actions.
+
+Examples:
+
+```text
+USER_LOGIN
+USER_LOGOUT
+MEDIA_CREATED
+MEDIA_DELETED
+JOB_CANCELLED
+MEDIA_DOWNLOADED
+PERMISSION_CHANGED
+```
+
+Audit logs are separate from processing events.
+
+---
+
+# 24. Outbox Events
+
+The outbox provides reliable event publication.
+
+Example:
+
+```text
+PostgreSQL transaction
+        │
+        ├── create job
+        │
+        └── create outbox event
+                 │
+                 ▼
+           Outbox Publisher
+                 │
+                 ▼
+               Redis
+```
+
+This prevents a situation where:
+
+```text
+DB transaction succeeds
+       +
+Redis publish fails
+       =
+job exists but is never queued
+```
+
+---
+
+# 25. Relationship Summary
+
+```text
+users
+  │
+  ├────< user_sessions
+  │
+  └────< media
+            │
+            ├────< media_assets
+            │
+            ├────< jobs
+            │        │
+            │        ├────< job_attempts
+            │        ├────< job_events
+            │        ├────< processing_results
+            │        └────< processing_manifests
+            │
+            ├────< transcripts
+            │        │
+            │        └────< transcript_segments
+            │
+            ├────< detections
+            ├────< scenes
+            ├────< clips
+            └────< ai_insights
+
+workers
+  │
+  └────< job_attempts
+```
+
+---
+
+# 26. Complete PostgreSQL DDL
+
+The following schema is designed to run on a fresh PostgreSQL database.
+
+Save it as:
+
+```text
+database/schema.sql
+```
+
+Then execute:
+
+```bash
+psql "$DATABASE_URL" -f database/schema.sql
+```
+
+---
+
+## 26.1 Extensions
 
 ```sql
--- ============================================================
--- High-Performance Distributed Media Analytics Platform
--- PostgreSQL Database Schema
---
--- File:
---   db/migrations/001_initial_schema.sql
---
--- ============================================================
-
-BEGIN;
-
--- ============================================================
--- EXTENSIONS
--- ============================================================
-
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+```
 
+---
 
--- ============================================================
--- ENUM TYPES
--- ============================================================
+## 26.2 Updated-at Function
 
-DO $$
+```sql
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
 BEGIN
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'user_status'
-    ) THEN
-        CREATE TYPE user_status AS ENUM (
-            'active',
-            'suspended',
-            'deleted'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'media_status'
-    ) THEN
-        CREATE TYPE media_status AS ENUM (
-            'uploading',
-            'uploaded',
-            'processing',
-            'ready',
-            'failed',
-            'deleted'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'asset_type'
-    ) THEN
-        CREATE TYPE asset_type AS ENUM (
-            'original',
-            'proxy',
-            'thumbnail',
-            'audio',
-            'clip',
-            'subtitle',
-            'intermediate'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'job_type'
-    ) THEN
-        CREATE TYPE job_type AS ENUM (
-            'media_probe',
-            'thumbnail_generation',
-            'audio_extraction',
-            'video_clip',
-            'audio_downmix',
-            'transcription',
-            'face_detection',
-            'object_detection',
-            'scene_detection',
-            'sentiment_analysis',
-            'ai_summary'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'job_status'
-    ) THEN
-        CREATE TYPE job_status AS ENUM (
-            'queued',
-            'running',
-            'succeeded',
-            'failed',
-            'cancelled',
-            'retrying'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'job_priority'
-    ) THEN
-        CREATE TYPE job_priority AS ENUM (
-            'low',
-            'normal',
-            'high',
-            'critical'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'artifact_type'
-    ) THEN
-        CREATE TYPE artifact_type AS ENUM (
-            'metadata',
-            'thumbnail',
-            'audio',
-            'clip',
-            'transcript',
-            'detection',
-            'scene',
-            'subtitle',
-            'analysis'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'worker_type'
-    ) THEN
-        CREATE TYPE worker_type AS ENUM (
-            'cpp',
-            'python',
-            'node'
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = 'worker_status'
-    ) THEN
-        CREATE TYPE worker_status AS ENUM (
-            'online',
-            'busy',
-            'offline',
-            'draining'
-        );
-    END IF;
-
-END
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
 $$;
+```
 
+---
 
--- ============================================================
--- USERS
--- ============================================================
+# 27. Users
 
-CREATE TABLE IF NOT EXISTS users (
+```sql
+CREATE TABLE users
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    email VARCHAR(320) NOT NULL,
+    email TEXT NOT NULL,
+
     password_hash TEXT NOT NULL,
 
-    display_name VARCHAR(120),
+    display_name TEXT NOT NULL,
 
-    status user_status NOT NULL DEFAULT 'active',
+    role TEXT NOT NULL DEFAULT 'user',
+
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    last_login_at TIMESTAMPTZ,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ,
 
-    CONSTRAINT users_email_not_blank
-        CHECK (length(trim(email)) > 0),
+    CONSTRAINT users_role_check
+        CHECK (role IN ('user', 'admin')),
 
-    CONSTRAINT users_deleted_consistency
-        CHECK (
-            (status = 'deleted' AND deleted_at IS NOT NULL)
-            OR
-            (status <> 'deleted')
-        )
+    CONSTRAINT users_display_name_check
+        CHECK (length(trim(display_name)) BETWEEN 1 AND 150)
 );
+```
 
-CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx
-    ON users (lower(email));
+Email uniqueness is case-insensitive:
 
-CREATE INDEX IF NOT EXISTS users_status_idx
-    ON users (status);
+```sql
+CREATE UNIQUE INDEX users_email_unique_idx
+    ON users (LOWER(email));
+```
 
+---
 
--- ============================================================
--- MEDIA
--- ============================================================
+# 28. User Sessions
 
-CREATE TABLE IF NOT EXISTS media (
+```sql
+CREATE TABLE user_sessions
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     user_id UUID NOT NULL,
 
-    title VARCHAR(255) NOT NULL,
+    token_hash TEXT NOT NULL,
 
-    original_filename TEXT,
+    user_agent TEXT,
 
-    mime_type VARCHAR(255),
+    ip_address INET,
 
-    status media_status NOT NULL DEFAULT 'uploading',
+    expires_at TIMESTAMPTZ NOT NULL,
+
+    revoked_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT user_sessions_user_fk
+        FOREIGN KEY (user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT user_sessions_token_unique
+        UNIQUE (token_hash)
+);
+
+CREATE INDEX user_sessions_user_idx
+    ON user_sessions(user_id);
+
+CREATE INDEX user_sessions_expiry_idx
+    ON user_sessions(expires_at);
+```
+
+---
+
+# 29. Media
+
+```sql
+CREATE TABLE media
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    owner_id UUID NOT NULL,
+
+    title TEXT NOT NULL,
+
+    original_filename TEXT NOT NULL,
+
+    media_type TEXT NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'uploading',
+
+    mime_type TEXT,
 
     size_bytes BIGINT,
 
@@ -901,103 +956,139 @@ CREATE TABLE IF NOT EXISTS media (
 
     height INTEGER,
 
-    frame_rate NUMERIC(10, 4),
+    frame_rate_num INTEGER,
 
-    video_codec VARCHAR(100),
+    frame_rate_den INTEGER,
 
-    audio_codec VARCHAR(100),
+    sample_rate INTEGER,
 
-    container_format VARCHAR(100),
+    channels INTEGER,
 
-    checksum_sha256 CHAR(64),
+    codec TEXT,
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checksum_sha256 TEXT,
+
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
     deleted_at TIMESTAMPTZ,
 
-    CONSTRAINT media_user_fk
-        FOREIGN KEY (user_id)
+    CONSTRAINT media_owner_fk
+        FOREIGN KEY (owner_id)
         REFERENCES users(id)
         ON DELETE RESTRICT,
 
-    CONSTRAINT media_title_not_blank
-        CHECK (length(trim(title)) > 0),
+    CONSTRAINT media_type_check
+        CHECK (media_type IN ('video', 'audio')),
 
-    CONSTRAINT media_size_nonnegative
-        CHECK (size_bytes IS NULL OR size_bytes >= 0),
-
-    CONSTRAINT media_duration_nonnegative
-        CHECK (duration_ms IS NULL OR duration_ms >= 0),
-
-    CONSTRAINT media_dimensions_valid
-        CHECK (
-            (width IS NULL OR width > 0)
-            AND
-            (height IS NULL OR height > 0)
+    CONSTRAINT media_status_check
+        CHECK
+        (
+            status IN
+            (
+                'uploading',
+                'ready',
+                'processing',
+                'processed',
+                'failed',
+                'deleted'
+            )
         ),
 
-    CONSTRAINT media_framerate_valid
-        CHECK (frame_rate IS NULL OR frame_rate > 0),
+    CONSTRAINT media_size_check
+        CHECK (size_bytes IS NULL OR size_bytes >= 0),
 
-    CONSTRAINT media_checksum_valid
-        CHECK (
-            checksum_sha256 IS NULL
-            OR checksum_sha256 ~ '^[0-9a-fA-F]{64}$'
-        )
+    CONSTRAINT media_duration_check
+        CHECK (duration_ms IS NULL OR duration_ms >= 0),
+
+    CONSTRAINT media_dimensions_check
+        CHECK
+        (
+            (width IS NULL AND height IS NULL)
+            OR
+            (width > 0 AND height > 0)
+        ),
+
+    CONSTRAINT media_frame_rate_check
+        CHECK
+        (
+            (frame_rate_num IS NULL AND frame_rate_den IS NULL)
+            OR
+            (
+                frame_rate_num > 0
+                AND frame_rate_den > 0
+            )
+        ),
+
+    CONSTRAINT media_sample_rate_check
+        CHECK (sample_rate IS NULL OR sample_rate > 0),
+
+    CONSTRAINT media_channels_check
+        CHECK (channels IS NULL OR channels > 0)
 );
+```
 
-CREATE INDEX IF NOT EXISTS media_user_id_idx
-    ON media (user_id);
+Indexes:
 
-CREATE INDEX IF NOT EXISTS media_status_idx
-    ON media (status);
+```sql
+CREATE INDEX media_owner_created_idx
+    ON media(owner_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS media_created_at_idx
-    ON media (created_at DESC);
+CREATE INDEX media_status_created_idx
+    ON media(status, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS media_user_created_idx
-    ON media (user_id, created_at DESC);
+CREATE INDEX media_active_owner_idx
+    ON media(owner_id, created_at DESC)
+    WHERE deleted_at IS NULL;
+```
 
-CREATE INDEX IF NOT EXISTS media_metadata_gin_idx
-    ON media USING GIN (metadata);
+---
 
+# 30. Media Assets
 
--- ============================================================
--- MEDIA ASSETS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS media_assets (
+```sql
+CREATE TABLE media_assets
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    asset_type asset_type NOT NULL,
+    generated_by_job_id UUID,
 
-    storage_provider VARCHAR(50) NOT NULL DEFAULT 's3',
+    asset_type TEXT NOT NULL,
 
-    bucket_name VARCHAR(255) NOT NULL,
+    storage_provider TEXT NOT NULL DEFAULT 's3',
+
+    bucket TEXT NOT NULL,
 
     object_key TEXT NOT NULL,
 
-    original_filename TEXT,
-
-    mime_type VARCHAR(255),
+    content_type TEXT,
 
     size_bytes BIGINT,
 
-    checksum_sha256 CHAR(64),
+    checksum_sha256 TEXT,
+
+    duration_ms BIGINT,
 
     width INTEGER,
 
     height INTEGER,
 
-    duration_ms BIGINT,
+    frame_rate_num INTEGER,
 
-    codec VARCHAR(100),
+    frame_rate_den INTEGER,
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    sample_rate INTEGER,
+
+    channels INTEGER,
+
+    codec TEXT,
+
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1006,79 +1097,80 @@ CREATE TABLE IF NOT EXISTS media_assets (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT media_assets_size_nonnegative
+    CONSTRAINT media_assets_asset_job_fk
+        FOREIGN KEY (generated_by_job_id)
+        REFERENCES jobs(id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT media_assets_type_check
+        CHECK
+        (
+            asset_type IN
+            (
+                'source',
+                'proxy',
+                'audio',
+                'thumbnail',
+                'waveform',
+                'clip',
+                'subtitle',
+                'manifest',
+                'other'
+            )
+        ),
+
+    CONSTRAINT media_assets_size_check
         CHECK (size_bytes IS NULL OR size_bytes >= 0),
 
-    CONSTRAINT media_assets_dimensions_valid
-        CHECK (
-            (width IS NULL OR width > 0)
-            AND
-            (height IS NULL OR height > 0)
-        ),
-
-    CONSTRAINT media_assets_duration_nonnegative
-        CHECK (duration_ms IS NULL OR duration_ms >= 0),
-
-    CONSTRAINT media_assets_checksum_valid
-        CHECK (
-            checksum_sha256 IS NULL
-            OR checksum_sha256 ~ '^[0-9a-fA-F]{64}$'
-        ),
-
-    CONSTRAINT media_assets_object_key_unique
-        UNIQUE (storage_provider, bucket_name, object_key)
+    CONSTRAINT media_assets_duration_check
+        CHECK (duration_ms IS NULL OR duration_ms >= 0)
 );
+```
 
-CREATE INDEX IF NOT EXISTS media_assets_media_id_idx
-    ON media_assets (media_id);
+The `generated_by_job_id` FK references `jobs`, which must exist first. Therefore, in the final executable schema the `media_assets` table is created **after `jobs`**.
 
-CREATE INDEX IF NOT EXISTS media_assets_type_idx
-    ON media_assets (media_id, asset_type);
+The complete ordering appears in the consolidated schema in Section 42.
 
-CREATE INDEX IF NOT EXISTS media_assets_metadata_gin_idx
-    ON media_assets USING GIN (metadata);
+---
 
+# 31. Jobs
 
--- ============================================================
--- JOBS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS jobs (
+```sql
+CREATE TABLE jobs
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    parent_job_id UUID,
+    type TEXT NOT NULL,
 
-    type job_type NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
 
-    status job_status NOT NULL DEFAULT 'queued',
+    priority INTEGER NOT NULL DEFAULT 100,
 
-    priority job_priority NOT NULL DEFAULT 'normal',
-
-    queue_name VARCHAR(100) NOT NULL,
-
-    attempt INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
 
     max_attempts INTEGER NOT NULL DEFAULT 3,
 
-    progress SMALLINT NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    idempotency_key VARCHAR(255),
+    leased_until TIMESTAMPTZ,
 
-    input JSONB NOT NULL DEFAULT '{}'::jsonb,
+    worker_id UUID,
 
-    output JSONB NOT NULL DEFAULT '{}'::jsonb,
+    correlation_id UUID NOT NULL DEFAULT gen_random_uuid(),
 
-    error_code VARCHAR(100),
+    idempotency_key TEXT,
+
+    input JSONB NOT NULL DEFAULT '{}'::JSONB,
+
+    output JSONB,
+
+    error_code TEXT,
 
     error_message TEXT,
 
     error_details JSONB,
-
-    worker_id UUID,
-
-    queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     started_at TIMESTAMPTZ,
 
@@ -1093,68 +1185,153 @@ CREATE TABLE IF NOT EXISTS jobs (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT jobs_parent_fk
-        FOREIGN KEY (parent_job_id)
-        REFERENCES jobs(id)
+    CONSTRAINT jobs_worker_fk
+        FOREIGN KEY (worker_id)
+        REFERENCES workers(id)
         ON DELETE SET NULL,
 
-    CONSTRAINT jobs_attempt_valid
-        CHECK (attempt >= 0),
+    CONSTRAINT jobs_status_check
+        CHECK
+        (
+            status IN
+            (
+                'queued',
+                'leased',
+                'running',
+                'succeeded',
+                'failed',
+                'cancelled',
+                'dead_letter'
+            )
+        ),
 
-    CONSTRAINT jobs_max_attempts_valid
-        CHECK (max_attempts > 0),
+    CONSTRAINT jobs_priority_check
+        CHECK (priority >= 0),
 
-    CONSTRAINT jobs_progress_valid
-        CHECK (progress >= 0 AND progress <= 100)
+    CONSTRAINT jobs_attempt_count_check
+        CHECK (attempt_count >= 0),
+
+    CONSTRAINT jobs_max_attempts_check
+        CHECK (max_attempts > 0)
 );
+```
 
-CREATE INDEX IF NOT EXISTS jobs_media_id_idx
-    ON jobs (media_id);
+---
 
-CREATE INDEX IF NOT EXISTS jobs_status_idx
-    ON jobs (status);
+# 32. Job Dependencies
 
-CREATE INDEX IF NOT EXISTS jobs_type_idx
-    ON jobs (type);
+```sql
+CREATE TABLE job_dependencies
+(
+    prerequisite_job_id UUID NOT NULL,
 
-CREATE INDEX IF NOT EXISTS jobs_parent_job_idx
-    ON jobs (parent_job_id);
+    dependent_job_id UUID NOT NULL,
 
-CREATE INDEX IF NOT EXISTS jobs_queue_status_priority_idx
-    ON jobs (queue_name, status, priority);
+    dependency_type TEXT NOT NULL DEFAULT 'blocks',
 
-CREATE INDEX IF NOT EXISTS jobs_created_at_idx
-    ON jobs (created_at DESC);
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-CREATE INDEX IF NOT EXISTS jobs_running_idx
-    ON jobs (status, started_at)
-    WHERE status = 'running';
+    PRIMARY KEY
+    (
+        prerequisite_job_id,
+        dependent_job_id
+    ),
 
-CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency_key_unique_idx
-    ON jobs (media_id, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+    CONSTRAINT job_dependencies_prerequisite_fk
+        FOREIGN KEY (prerequisite_job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
+    CONSTRAINT job_dependencies_dependent_fk
+        FOREIGN KEY (dependent_job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
--- ============================================================
--- JOB EVENTS
--- ============================================================
+    CONSTRAINT job_dependencies_self_check
+        CHECK (prerequisite_job_id <> dependent_job_id),
 
-CREATE TABLE IF NOT EXISTS job_events (
+    CONSTRAINT job_dependencies_type_check
+        CHECK (dependency_type IN ('blocks'))
+);
+```
+
+---
+
+# 33. Job Attempts
+
+```sql
+CREATE TABLE job_attempts
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     job_id UUID NOT NULL,
 
-    event_type VARCHAR(100) NOT NULL,
+    attempt_number INTEGER NOT NULL,
 
-    previous_status job_status,
+    worker_id UUID,
 
-    new_status job_status,
+    status TEXT NOT NULL DEFAULT 'started',
 
-    progress SMALLINT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    finished_at TIMESTAMPTZ,
+
+    error_code TEXT,
+
+    error_message TEXT,
+
+    metrics JSONB NOT NULL DEFAULT '{}'::JSONB,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT job_attempts_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT job_attempts_worker_fk
+        FOREIGN KEY (worker_id)
+        REFERENCES workers(id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT job_attempts_number_check
+        CHECK (attempt_number > 0),
+
+    CONSTRAINT job_attempts_status_check
+        CHECK
+        (
+            status IN
+            (
+                'started',
+                'succeeded',
+                'failed',
+                'timed_out'
+            )
+        ),
+
+    CONSTRAINT job_attempts_unique
+        UNIQUE(job_id, attempt_number)
+);
+```
+
+---
+
+# 34. Job Events
+
+```sql
+CREATE TABLE job_events
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    job_id UUID NOT NULL,
+
+    event_type TEXT NOT NULL,
+
+    progress_percent NUMERIC(5,2),
 
     message TEXT,
 
-    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1163,42 +1340,90 @@ CREATE TABLE IF NOT EXISTS job_events (
         REFERENCES jobs(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT job_events_progress_valid
-        CHECK (
-            progress IS NULL
+    CONSTRAINT job_events_progress_check
+        CHECK
+        (
+            progress_percent IS NULL
             OR
-            (progress >= 0 AND progress <= 100)
+            (
+                progress_percent >= 0
+                AND progress_percent <= 100
+            )
+        ),
+
+    CONSTRAINT job_events_type_check
+        CHECK
+        (
+            event_type IN
+            (
+                'created',
+                'queued',
+                'leased',
+                'started',
+                'progress',
+                'completed',
+                'failed',
+                'retried',
+                'cancelled',
+                'dead_letter'
+            )
         )
 );
+```
 
-CREATE INDEX IF NOT EXISTS job_events_job_created_idx
-    ON job_events (job_id, created_at ASC);
+---
 
-CREATE INDEX IF NOT EXISTS job_events_created_idx
-    ON job_events (created_at DESC);
+# 35. Processing Manifests
 
-CREATE INDEX IF NOT EXISTS job_events_type_idx
-    ON job_events (event_type);
+```sql
+CREATE TABLE processing_manifests
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
+    media_id UUID NOT NULL,
 
--- ============================================================
--- PROCESSING RESULTS
--- ============================================================
+    job_id UUID NOT NULL,
 
-CREATE TABLE IF NOT EXISTS processing_results (
+    schema_version INTEGER NOT NULL DEFAULT 1,
+
+    manifest JSONB NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT processing_manifests_media_fk
+        FOREIGN KEY (media_id)
+        REFERENCES media(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT processing_manifests_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT processing_manifests_schema_check
+        CHECK (schema_version > 0),
+
+    CONSTRAINT processing_manifests_job_unique
+        UNIQUE(job_id, schema_version)
+);
+```
+
+---
+
+# 36. Processing Results
+
+```sql
+CREATE TABLE processing_results
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     job_id UUID NOT NULL,
 
-    media_id UUID NOT NULL,
+    result_type TEXT NOT NULL,
 
-    result_type artifact_type NOT NULL,
+    summary JSONB NOT NULL DEFAULT '{}'::JSONB,
 
-    version INTEGER NOT NULL DEFAULT 1,
-
-    status VARCHAR(50) NOT NULL DEFAULT 'completed',
-
-    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metrics JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1207,154 +1432,83 @@ CREATE TABLE IF NOT EXISTS processing_results (
         REFERENCES jobs(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT processing_results_media_fk
-        FOREIGN KEY (media_id)
-        REFERENCES media(id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT processing_results_version_valid
-        CHECK (version > 0)
+    CONSTRAINT processing_results_type_check
+        CHECK
+        (
+            result_type IN
+            (
+                'probe',
+                'transcode',
+                'audio_extract',
+                'thumbnail',
+                'scene_detection',
+                'face_detection',
+                'object_detection',
+                'transcription',
+                'clip_generation',
+                'ai_analysis',
+                'other'
+            )
+        )
 );
+```
 
-CREATE INDEX IF NOT EXISTS processing_results_job_idx
-    ON processing_results (job_id);
+---
 
-CREATE INDEX IF NOT EXISTS processing_results_media_idx
-    ON processing_results (media_id);
+# 37. Transcripts
 
-CREATE INDEX IF NOT EXISTS processing_results_type_idx
-    ON processing_results (media_id, result_type);
-
-CREATE INDEX IF NOT EXISTS processing_results_result_gin_idx
-    ON processing_results USING GIN (result);
-
-
--- ============================================================
--- PROCESSING ARTIFACTS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS processing_artifacts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-    result_id UUID,
-
-    media_id UUID NOT NULL,
-
-    asset_id UUID,
-
-    artifact_type artifact_type NOT NULL,
-
-    storage_provider VARCHAR(50) NOT NULL DEFAULT 's3',
-
-    bucket_name VARCHAR(255) NOT NULL,
-
-    object_key TEXT NOT NULL,
-
-    mime_type VARCHAR(255),
-
-    size_bytes BIGINT,
-
-    checksum_sha256 CHAR(64),
-
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT processing_artifacts_result_fk
-        FOREIGN KEY (result_id)
-        REFERENCES processing_results(id)
-        ON DELETE SET NULL,
-
-    CONSTRAINT processing_artifacts_media_fk
-        FOREIGN KEY (media_id)
-        REFERENCES media(id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT processing_artifacts_asset_fk
-        FOREIGN KEY (asset_id)
-        REFERENCES media_assets(id)
-        ON DELETE SET NULL,
-
-    CONSTRAINT processing_artifacts_size_valid
-        CHECK (size_bytes IS NULL OR size_bytes >= 0),
-
-    CONSTRAINT processing_artifacts_checksum_valid
-        CHECK (
-            checksum_sha256 IS NULL
-            OR checksum_sha256 ~ '^[0-9a-fA-F]{64}$'
-        ),
-
-    CONSTRAINT processing_artifacts_object_unique
-        UNIQUE (storage_provider, bucket_name, object_key)
-);
-
-CREATE INDEX IF NOT EXISTS processing_artifacts_media_idx
-    ON processing_artifacts (media_id);
-
-CREATE INDEX IF NOT EXISTS processing_artifacts_result_idx
-    ON processing_artifacts (result_id);
-
-CREATE INDEX IF NOT EXISTS processing_artifacts_asset_idx
-    ON processing_artifacts (asset_id);
-
-
--- ============================================================
--- TRANSCRIPTS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS transcripts (
+```sql
+CREATE TABLE transcripts
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    processing_result_id UUID,
+    job_id UUID NOT NULL,
 
-    language VARCHAR(20),
+    language TEXT,
 
-    model VARCHAR(255),
+    model_name TEXT,
 
-    provider VARCHAR(100),
+    full_text TEXT NOT NULL DEFAULT '',
 
-    confidence NUMERIC(6, 5),
-
-    full_text TEXT,
-
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    confidence NUMERIC(5,4),
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT transcripts_media_fk
         FOREIGN KEY (media_id)
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT transcripts_result_fk
-        FOREIGN KEY (processing_result_id)
-        REFERENCES processing_results(id)
-        ON DELETE SET NULL,
+    CONSTRAINT transcripts_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
-    CONSTRAINT transcripts_confidence_valid
-        CHECK (
+    CONSTRAINT transcripts_confidence_check
+        CHECK
+        (
             confidence IS NULL
             OR
-            (confidence >= 0 AND confidence <= 1)
-        )
+            (
+                confidence >= 0
+                AND confidence <= 1
+            )
+        ),
+
+    CONSTRAINT transcripts_job_unique
+        UNIQUE(job_id)
 );
+```
 
-CREATE INDEX IF NOT EXISTS transcripts_media_idx
-    ON transcripts (media_id);
+---
 
-CREATE INDEX IF NOT EXISTS transcripts_language_idx
-    ON transcripts (language);
+# 38. Transcript Segments
 
-
--- ============================================================
--- TRANSCRIPT SEGMENTS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS transcript_segments (
+```sql
+CREATE TABLE transcript_segments
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     transcript_id UUID NOT NULL,
@@ -1367,11 +1521,11 @@ CREATE TABLE IF NOT EXISTS transcript_segments (
 
     text TEXT NOT NULL,
 
-    confidence NUMERIC(6, 5),
+    speaker_label TEXT,
 
-    speaker VARCHAR(100),
+    confidence NUMERIC(5,4),
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    words JSONB NOT NULL DEFAULT '[]'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1380,50 +1534,50 @@ CREATE TABLE IF NOT EXISTS transcript_segments (
         REFERENCES transcripts(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT transcript_segments_index_valid
+    CONSTRAINT transcript_segments_index_check
         CHECK (segment_index >= 0),
 
-    CONSTRAINT transcript_segments_time_valid
-        CHECK (
+    CONSTRAINT transcript_segments_time_check
+        CHECK
+        (
             start_ms >= 0
-            AND
-            end_ms >= start_ms
+            AND end_ms > start_ms
         ),
 
-    CONSTRAINT transcript_segments_confidence_valid
-        CHECK (
+    CONSTRAINT transcript_segments_confidence_check
+        CHECK
+        (
             confidence IS NULL
             OR
-            (confidence >= 0 AND confidence <= 1)
+            (
+                confidence >= 0
+                AND confidence <= 1
+            )
         ),
 
-    CONSTRAINT transcript_segments_unique_index
-        UNIQUE (transcript_id, segment_index)
+    CONSTRAINT transcript_segments_unique
+        UNIQUE(transcript_id, segment_index)
 );
+```
 
-CREATE INDEX IF NOT EXISTS transcript_segments_transcript_idx
-    ON transcript_segments (transcript_id, segment_index);
+---
 
-CREATE INDEX IF NOT EXISTS transcript_segments_timeline_idx
-    ON transcript_segments (transcript_id, start_ms, end_ms);
+# 39. Detections
 
-
--- ============================================================
--- DETECTIONS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS detections (
+```sql
+CREATE TABLE detections
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    processing_result_id UUID,
+    job_id UUID NOT NULL,
 
-    detection_type VARCHAR(100) NOT NULL,
+    detection_type TEXT NOT NULL,
 
-    label VARCHAR(255) NOT NULL,
+    label TEXT NOT NULL,
 
-    confidence NUMERIC(6, 5),
+    confidence NUMERIC(5,4),
 
     start_ms BIGINT,
 
@@ -1431,17 +1585,17 @@ CREATE TABLE IF NOT EXISTS detections (
 
     frame_number BIGINT,
 
-    tracking_id VARCHAR(255),
+    bbox_x NUMERIC(10,6),
 
-    bbox_x NUMERIC(10, 8),
+    bbox_y NUMERIC(10,6),
 
-    bbox_y NUMERIC(10, 8),
+    bbox_width NUMERIC(10,6),
 
-    bbox_width NUMERIC(10, 8),
+    bbox_height NUMERIC(10,6),
 
-    bbox_height NUMERIC(10, 8),
+    track_id TEXT,
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    attributes JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1450,66 +1604,80 @@ CREATE TABLE IF NOT EXISTS detections (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT detections_result_fk
-        FOREIGN KEY (processing_result_id)
-        REFERENCES processing_results(id)
-        ON DELETE SET NULL,
+    CONSTRAINT detections_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
-    CONSTRAINT detections_confidence_valid
-        CHECK (
-            confidence IS NULL
-            OR
-            (confidence >= 0 AND confidence <= 1)
-        ),
-
-    CONSTRAINT detections_time_valid
-        CHECK (
-            (start_ms IS NULL OR start_ms >= 0)
-            AND
-            (end_ms IS NULL OR end_ms >= 0)
-            AND
+    CONSTRAINT detections_type_check
+        CHECK
+        (
+            detection_type IN
             (
-                start_ms IS NULL
-                OR end_ms IS NULL
-                OR end_ms >= start_ms
+                'face',
+                'person',
+                'object',
+                'logo',
+                'vehicle',
+                'animal',
+                'custom'
             )
         ),
 
-    CONSTRAINT detections_bbox_valid
-        CHECK (
-            (bbox_x IS NULL OR bbox_x BETWEEN 0 AND 1)
-            AND
-            (bbox_y IS NULL OR bbox_y BETWEEN 0 AND 1)
-            AND
-            (bbox_width IS NULL OR bbox_width BETWEEN 0 AND 1)
-            AND
-            (bbox_height IS NULL OR bbox_height BETWEEN 0 AND 1)
+    CONSTRAINT detections_confidence_check
+        CHECK
+        (
+            confidence IS NULL
+            OR
+            (
+                confidence >= 0
+                AND confidence <= 1
+            )
+        ),
+
+    CONSTRAINT detections_time_check
+        CHECK
+        (
+            (start_ms IS NULL AND end_ms IS NULL)
+            OR
+            (
+                start_ms >= 0
+                AND end_ms > start_ms
+            )
+        ),
+
+    CONSTRAINT detections_bbox_check
+        CHECK
+        (
+            (
+                bbox_x IS NULL
+                AND bbox_y IS NULL
+                AND bbox_width IS NULL
+                AND bbox_height IS NULL
+            )
+            OR
+            (
+                bbox_x >= 0
+                AND bbox_y >= 0
+                AND bbox_width >= 0
+                AND bbox_height >= 0
+            )
         )
 );
+```
 
-CREATE INDEX IF NOT EXISTS detections_media_idx
-    ON detections (media_id);
+---
 
-CREATE INDEX IF NOT EXISTS detections_type_idx
-    ON detections (media_id, detection_type);
+# 40. Scenes
 
-CREATE INDEX IF NOT EXISTS detections_timeline_idx
-    ON detections (media_id, start_ms, end_ms);
-
-CREATE INDEX IF NOT EXISTS detections_tracking_idx
-    ON detections (media_id, tracking_id);
-
-
--- ============================================================
--- SCENES
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS scenes (
+```sql
+CREATE TABLE scenes
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    processing_result_id UUID,
+    job_id UUID NOT NULL,
 
     scene_index INTEGER NOT NULL,
 
@@ -1517,11 +1685,11 @@ CREATE TABLE IF NOT EXISTS scenes (
 
     end_ms BIGINT NOT NULL,
 
-    confidence NUMERIC(6, 5),
+    score NUMERIC(5,4),
 
-    label VARCHAR(255),
+    label TEXT,
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1530,63 +1698,65 @@ CREATE TABLE IF NOT EXISTS scenes (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT scenes_result_fk
-        FOREIGN KEY (processing_result_id)
-        REFERENCES processing_results(id)
-        ON DELETE SET NULL,
+    CONSTRAINT scenes_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
-    CONSTRAINT scenes_index_valid
+    CONSTRAINT scenes_index_check
         CHECK (scene_index >= 0),
 
-    CONSTRAINT scenes_time_valid
-        CHECK (
+    CONSTRAINT scenes_time_check
+        CHECK
+        (
             start_ms >= 0
-            AND end_ms >= start_ms
+            AND end_ms > start_ms
         ),
 
-    CONSTRAINT scenes_confidence_valid
-        CHECK (
-            confidence IS NULL
+    CONSTRAINT scenes_score_check
+        CHECK
+        (
+            score IS NULL
             OR
-            (confidence >= 0 AND confidence <= 1)
+            (
+                score >= 0
+                AND score <= 1
+            )
         ),
 
-    CONSTRAINT scenes_unique_index
-        UNIQUE (media_id, scene_index)
+    CONSTRAINT scenes_unique
+        UNIQUE(job_id, scene_index)
 );
+```
 
-CREATE INDEX IF NOT EXISTS scenes_media_timeline_idx
-    ON scenes (media_id, start_ms, end_ms);
+---
 
-CREATE INDEX IF NOT EXISTS scenes_media_idx
-    ON scenes (media_id);
+# 41. Clips
 
-
--- ============================================================
--- CLIPS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS clips (
+```sql
+CREATE TABLE clips
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    processing_result_id UUID,
+    job_id UUID,
 
-    asset_id UUID,
+    source_asset_id UUID,
 
-    title VARCHAR(255),
+    output_asset_id UUID,
+
+    name TEXT NOT NULL,
 
     start_ms BIGINT NOT NULL,
 
     end_ms BIGINT NOT NULL,
 
-    duration_ms BIGINT GENERATED ALWAYS AS
-        (end_ms - start_ms) STORED,
+    status TEXT NOT NULL DEFAULT 'requested',
 
-    status VARCHAR(50) NOT NULL DEFAULT 'ready',
+    requested_format TEXT,
 
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1597,54 +1767,63 @@ CREATE TABLE IF NOT EXISTS clips (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT clips_result_fk
-        FOREIGN KEY (processing_result_id)
-        REFERENCES processing_results(id)
+    CONSTRAINT clips_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
         ON DELETE SET NULL,
 
-    CONSTRAINT clips_asset_fk
-        FOREIGN KEY (asset_id)
+    CONSTRAINT clips_source_asset_fk
+        FOREIGN KEY (source_asset_id)
         REFERENCES media_assets(id)
         ON DELETE SET NULL,
 
-    CONSTRAINT clips_time_valid
-        CHECK (
+    CONSTRAINT clips_output_asset_fk
+        FOREIGN KEY (output_asset_id)
+        REFERENCES media_assets(id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT clips_time_check
+        CHECK
+        (
             start_ms >= 0
             AND end_ms > start_ms
+        ),
+
+    CONSTRAINT clips_status_check
+        CHECK
+        (
+            status IN
+            (
+                'requested',
+                'processing',
+                'ready',
+                'failed',
+                'cancelled'
+            )
         )
 );
+```
 
-CREATE INDEX IF NOT EXISTS clips_media_timeline_idx
-    ON clips (media_id, start_ms, end_ms);
+---
 
-CREATE INDEX IF NOT EXISTS clips_asset_idx
-    ON clips (asset_id);
+# 42. AI Insights
 
-
--- ============================================================
--- AI INSIGHTS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS ai_insights (
+```sql
+CREATE TABLE ai_insights
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     media_id UUID NOT NULL,
 
-    processing_result_id UUID,
+    job_id UUID NOT NULL,
 
-    insight_type VARCHAR(100) NOT NULL,
+    insight_type TEXT NOT NULL,
 
-    model VARCHAR(255),
+    model_name TEXT,
 
-    provider VARCHAR(100),
+    content JSONB NOT NULL,
 
-    confidence NUMERIC(6, 5),
-
-    title VARCHAR(255),
-
-    content TEXT,
-
-    structured_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    confidence NUMERIC(5,4),
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1653,2144 +1832,1238 @@ CREATE TABLE IF NOT EXISTS ai_insights (
         REFERENCES media(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT ai_insights_result_fk
-        FOREIGN KEY (processing_result_id)
-        REFERENCES processing_results(id)
-        ON DELETE SET NULL,
+    CONSTRAINT ai_insights_job_fk
+        FOREIGN KEY (job_id)
+        REFERENCES jobs(id)
+        ON DELETE CASCADE,
 
-    CONSTRAINT ai_insights_confidence_valid
-        CHECK (
+    CONSTRAINT ai_insights_type_check
+        CHECK
+        (
+            insight_type IN
+            (
+                'summary',
+                'sentiment',
+                'keywords',
+                'topics',
+                'moderation',
+                'classification',
+                'embedding',
+                'speaker_analysis',
+                'custom'
+            )
+        ),
+
+    CONSTRAINT ai_insights_confidence_check
+        CHECK
+        (
             confidence IS NULL
             OR
-            (confidence >= 0 AND confidence <= 1)
+            (
+                confidence >= 0
+                AND confidence <= 1
+            )
         )
 );
+```
 
-CREATE INDEX IF NOT EXISTS ai_insights_media_idx
-    ON ai_insights (media_id);
+---
 
-CREATE INDEX IF NOT EXISTS ai_insights_type_idx
-    ON ai_insights (media_id, insight_type);
+# 43. Workers
 
-CREATE INDEX IF NOT EXISTS ai_insights_data_gin_idx
-    ON ai_insights USING GIN (structured_data);
+Workers must exist before tables that reference them.
 
-
--- ============================================================
--- WORKERS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS workers (
+```sql
+CREATE TABLE workers
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    worker_name VARCHAR(255) NOT NULL,
+    worker_key TEXT NOT NULL,
 
-    worker_type worker_type NOT NULL,
+    worker_type TEXT NOT NULL,
 
-    status worker_status NOT NULL DEFAULT 'offline',
+    hostname TEXT,
 
-    hostname VARCHAR(255),
+    version TEXT,
 
-    process_id BIGINT,
+    status TEXT NOT NULL DEFAULT 'offline',
 
-    version VARCHAR(100),
-
-    capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    capabilities JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     last_heartbeat_at TIMESTAMPTZ,
+
+    started_at TIMESTAMPTZ,
+
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT workers_name_unique
-        UNIQUE (worker_name)
+    CONSTRAINT workers_key_unique
+        UNIQUE(worker_key),
+
+    CONSTRAINT workers_type_check
+        CHECK
+        (
+            worker_type IN
+            (
+                'cpp',
+                'python'
+            )
+        ),
+
+    CONSTRAINT workers_status_check
+        CHECK
+        (
+            status IN
+            (
+                'online',
+                'draining',
+                'offline'
+            )
+        )
 );
+```
 
-CREATE INDEX IF NOT EXISTS workers_type_idx
-    ON workers (worker_type);
+---
 
-CREATE INDEX IF NOT EXISTS workers_status_idx
-    ON workers (status);
+# 44. Audit Logs
 
-CREATE INDEX IF NOT EXISTS workers_heartbeat_idx
-    ON workers (last_heartbeat_at);
-
-
--- ============================================================
--- WORKER HEARTBEATS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS worker_heartbeats (
+```sql
+CREATE TABLE audit_logs
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    worker_id UUID NOT NULL,
+    actor_user_id UUID,
 
-    job_id UUID,
+    action TEXT NOT NULL,
 
-    cpu_percent NUMERIC(6, 2),
+    resource_type TEXT,
 
-    memory_bytes BIGINT,
+    resource_id UUID,
 
-    active_jobs INTEGER NOT NULL DEFAULT 0,
-
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT worker_heartbeats_worker_fk
-        FOREIGN KEY (worker_id)
-        REFERENCES workers(id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT worker_heartbeats_job_fk
-        FOREIGN KEY (job_id)
-        REFERENCES jobs(id)
-        ON DELETE SET NULL,
-
-    CONSTRAINT worker_heartbeats_cpu_valid
-        CHECK (
-            cpu_percent IS NULL
-            OR cpu_percent >= 0
-        ),
-
-    CONSTRAINT worker_heartbeats_memory_valid
-        CHECK (
-            memory_bytes IS NULL
-            OR memory_bytes >= 0
-        ),
-
-    CONSTRAINT worker_heartbeats_active_jobs_valid
-        CHECK (active_jobs >= 0)
+    CONSTRAINT audit_logs_actor_fk
+        FOREIGN KEY (actor_user_id)
+        REFERENCES users(id)
+        ON DELETE SET NULL
 );
+```
 
-CREATE INDEX IF NOT EXISTS worker_heartbeats_worker_time_idx
-    ON worker_heartbeats (worker_id, created_at DESC);
+---
 
-CREATE INDEX IF NOT EXISTS worker_heartbeats_created_idx
-    ON worker_heartbeats (created_at DESC);
+# 45. Outbox Events
 
-
--- ============================================================
--- PROCESSING MANIFESTS
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS processing_manifests (
+```sql
+CREATE TABLE outbox_events
+(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    job_id UUID NOT NULL,
+    aggregate_type TEXT NOT NULL,
 
-    media_id UUID NOT NULL,
+    aggregate_id UUID NOT NULL,
 
-    manifest_version INTEGER NOT NULL DEFAULT 1,
+    event_type TEXT NOT NULL,
 
-    manifest JSONB NOT NULL,
+    payload JSONB NOT NULL,
+
+    published_at TIMESTAMPTZ,
+
+    attempts INTEGER NOT NULL DEFAULT 0,
+
+    last_error TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT processing_manifests_job_fk
-        FOREIGN KEY (job_id)
-        REFERENCES jobs(id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT processing_manifests_media_fk
-        FOREIGN KEY (media_id)
-        REFERENCES media(id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT processing_manifests_version_valid
-        CHECK (manifest_version > 0)
+    CONSTRAINT outbox_attempts_check
+        CHECK (attempts >= 0)
 );
+```
 
-CREATE INDEX IF NOT EXISTS processing_manifests_job_idx
-    ON processing_manifests (job_id);
+---
 
-CREATE INDEX IF NOT EXISTS processing_manifests_media_idx
-    ON processing_manifests (media_id);
+# 46. Required Indexes
 
-CREATE INDEX IF NOT EXISTS processing_manifests_manifest_gin_idx
-    ON processing_manifests USING GIN (manifest);
+## Jobs
 
+```sql
+CREATE INDEX jobs_queue_idx
+    ON jobs(priority DESC, available_at ASC)
+    WHERE status = 'queued';
 
--- ============================================================
--- UPDATED_AT TRIGGER
--- ============================================================
+CREATE INDEX jobs_media_status_idx
+    ON jobs(media_id, status);
 
-CREATE OR REPLACE FUNCTION set_updated_at()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$;
+CREATE INDEX jobs_worker_status_idx
+    ON jobs(worker_id, status);
 
+CREATE INDEX jobs_correlation_idx
+    ON jobs(correlation_id);
 
--- ============================================================
--- UPDATED_AT TRIGGERS
--- ============================================================
+CREATE INDEX jobs_created_idx
+    ON jobs(created_at DESC);
 
-DROP TRIGGER IF EXISTS users_set_updated_at ON users;
+CREATE UNIQUE INDEX jobs_idempotency_unique_idx
+    ON jobs(media_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+```
 
+---
+
+## Job dependencies
+
+```sql
+CREATE INDEX job_dependencies_prerequisite_idx
+    ON job_dependencies(prerequisite_job_id);
+
+CREATE INDEX job_dependencies_dependent_idx
+    ON job_dependencies(dependent_job_id);
+```
+
+---
+
+## Job attempts
+
+```sql
+CREATE INDEX job_attempts_job_idx
+    ON job_attempts(job_id);
+
+CREATE INDEX job_attempts_worker_idx
+    ON job_attempts(worker_id);
+
+CREATE INDEX job_attempts_status_idx
+    ON job_attempts(status);
+```
+
+---
+
+## Job events
+
+```sql
+CREATE INDEX job_events_job_created_idx
+    ON job_events(job_id, created_at ASC);
+```
+
+---
+
+## Media assets
+
+```sql
+CREATE UNIQUE INDEX media_assets_object_unique_idx
+    ON media_assets(storage_provider, bucket, object_key);
+
+CREATE INDEX media_assets_media_idx
+    ON media_assets(media_id, asset_type);
+
+CREATE INDEX media_assets_job_idx
+    ON media_assets(generated_by_job_id);
+```
+
+---
+
+## Transcripts
+
+```sql
+CREATE INDEX transcripts_media_idx
+    ON transcripts(media_id, created_at DESC);
+
+CREATE INDEX transcript_segments_time_idx
+    ON transcript_segments(transcript_id, start_ms);
+```
+
+---
+
+## Detections
+
+```sql
+CREATE INDEX detections_media_time_idx
+    ON detections(media_id, start_ms);
+
+CREATE INDEX detections_media_type_idx
+    ON detections(media_id, detection_type);
+
+CREATE INDEX detections_track_idx
+    ON detections(media_id, track_id);
+```
+
+---
+
+## Scenes
+
+```sql
+CREATE INDEX scenes_media_time_idx
+    ON scenes(media_id, start_ms);
+```
+
+---
+
+## Clips
+
+```sql
+CREATE INDEX clips_media_idx
+    ON clips(media_id, created_at DESC);
+
+CREATE INDEX clips_status_idx
+    ON clips(status);
+```
+
+---
+
+## AI insights
+
+```sql
+CREATE INDEX ai_insights_media_idx
+    ON ai_insights(media_id, created_at DESC);
+
+CREATE INDEX ai_insights_type_idx
+    ON ai_insights(media_id, insight_type);
+```
+
+---
+
+## Workers
+
+```sql
+CREATE INDEX workers_status_idx
+    ON workers(status);
+
+CREATE INDEX workers_heartbeat_idx
+    ON workers(last_heartbeat_at);
+```
+
+---
+
+## Audit logs
+
+```sql
+CREATE INDEX audit_logs_actor_idx
+    ON audit_logs(actor_user_id, created_at DESC);
+
+CREATE INDEX audit_logs_resource_idx
+    ON audit_logs(resource_type, resource_id);
+
+CREATE INDEX audit_logs_created_idx
+    ON audit_logs(created_at DESC);
+```
+
+---
+
+## Outbox
+
+```sql
+CREATE INDEX outbox_unpublished_idx
+    ON outbox_events(created_at ASC)
+    WHERE published_at IS NULL;
+```
+
+---
+
+# 47. Updated-at Triggers
+
+```sql
 CREATE TRIGGER users_set_updated_at
 BEFORE UPDATE ON users
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
-
-
-DROP TRIGGER IF EXISTS media_set_updated_at ON media;
 
 CREATE TRIGGER media_set_updated_at
 BEFORE UPDATE ON media
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
-
-DROP TRIGGER IF EXISTS transcripts_set_updated_at ON transcripts;
-
-CREATE TRIGGER transcripts_set_updated_at
-BEFORE UPDATE ON transcripts
-FOR EACH ROW
-EXECUTE FUNCTION set_updated_at();
-
-
-DROP TRIGGER IF EXISTS clips_set_updated_at ON clips;
-
-CREATE TRIGGER clips_set_updated_at
-BEFORE UPDATE ON clips
-FOR EACH ROW
-EXECUTE FUNCTION set_updated_at();
-
-
-DROP TRIGGER IF EXISTS workers_set_updated_at ON workers;
-
 CREATE TRIGGER workers_set_updated_at
 BEFORE UPDATE ON workers
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
-
-DROP TRIGGER IF EXISTS jobs_set_updated_at ON jobs;
-
-CREATE TRIGGER jobs_set_updated_at
-BEFORE UPDATE ON jobs
+CREATE TRIGGER clips_set_updated_at
+BEFORE UPDATE ON clips
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
-
-
--- ============================================================
--- ADDITIONAL JOB INDEXES
--- ============================================================
-
-CREATE INDEX IF NOT EXISTS jobs_worker_idx
-    ON jobs (worker_id);
-
-CREATE INDEX IF NOT EXISTS jobs_media_status_idx
-    ON jobs (media_id, status);
-
-CREATE INDEX IF NOT EXISTS jobs_retry_idx
-    ON jobs (status, attempt)
-    WHERE status IN ('retrying', 'failed');
-
-
--- ============================================================
--- COMMENTS
--- ============================================================
-
-COMMENT ON TABLE users IS
-    'Authenticated platform users.';
-
-COMMENT ON TABLE media IS
-    'Logical media items uploaded to the platform.';
-
-COMMENT ON TABLE media_assets IS
-    'Physical media objects stored in object storage.';
-
-COMMENT ON TABLE jobs IS
-    'Asynchronous media processing jobs.';
-
-COMMENT ON TABLE job_events IS
-    'Immutable job execution and state transition history.';
-
-COMMENT ON TABLE processing_results IS
-    'Structured results produced by processing jobs.';
-
-COMMENT ON TABLE processing_artifacts IS
-    'Files and objects generated by processing jobs.';
-
-COMMENT ON TABLE transcripts IS
-    'Machine-generated transcripts associated with media.';
-
-COMMENT ON TABLE transcript_segments IS
-    'Timestamped transcript segments.';
-
-COMMENT ON TABLE detections IS
-    'Computer vision detection and tracking results.';
-
-COMMENT ON TABLE scenes IS
-    'Detected temporal scenes in media.';
-
-COMMENT ON TABLE clips IS
-    'Extracted media clips.';
-
-COMMENT ON TABLE ai_insights IS
-    'AI-generated summaries, sentiment, topics and other insights.';
-
-COMMENT ON TABLE workers IS
-    'Registered C++, Python and Node processing workers.';
-
-COMMENT ON TABLE worker_heartbeats IS
-    'Worker health and resource telemetry.';
-
-COMMENT ON TABLE processing_manifests IS
-    'Machine-readable processing output manifests.';
-
-
-COMMIT;
 ```
 
 ---
 
-# 25. Schema Verification Queries
+# 48. Complete Executable Schema
 
-After running the migration, execute:
-
-```sql
-SELECT current_database();
-```
-
-Then:
-
-```sql
-\dt
-```
-
-Expected tables:
+For implementation, the recommended physical ordering is:
 
 ```text
-ai_insights
-clips
-detections
-job_events
-jobs
-media
-media_assets
-processing_artifacts
-processing_manifests
-processing_results
-scenes
-transcript_segments
-transcripts
-users
-worker_heartbeats
-workers
+1.  pgcrypto
+2.  set_updated_at()
+3.  users
+4.  user_sessions
+5.  workers
+6.  media
+7.  jobs
+8.  job_dependencies
+9.  job_attempts
+10. job_events
+11. media_assets
+12. processing_manifests
+13. processing_results
+14. transcripts
+15. transcript_segments
+16. detections
+17. scenes
+18. clips
+19. ai_insights
+20. audit_logs
+21. outbox_events
+22. indexes
+23. triggers
 ```
 
-Check enums:
-
-```sql
-SELECT typname
-FROM pg_type
-WHERE typtype = 'e'
-ORDER BY typname;
-```
+This ordering avoids circular foreign-key creation problems.
 
 ---
 
-# 26. Verify Foreign Keys
+# 49. Seed Data
 
-Run:
-
-```sql
-SELECT
-    tc.table_name,
-    kcu.column_name,
-    ccu.table_name AS foreign_table_name,
-    ccu.column_name AS foreign_column_name
-FROM information_schema.table_constraints AS tc
-JOIN information_schema.key_column_usage AS kcu
-    ON tc.constraint_name = kcu.constraint_name
-JOIN information_schema.constraint_column_usage AS ccu
-    ON ccu.constraint_name = tc.constraint_name
-WHERE tc.constraint_type = 'FOREIGN KEY'
-ORDER BY tc.table_name;
-```
-
-This should show relationships between:
-
-```text
-users → media
-
-media → media_assets
-media → jobs
-media → processing_results
-media → processing_artifacts
-media → transcripts
-media → detections
-media → scenes
-media → clips
-media → ai_insights
-
-jobs → jobs
-jobs → job_events
-jobs → processing_results
-jobs → processing_manifests
-
-transcripts → transcript_segments
-
-workers → worker_heartbeats
-jobs → worker_heartbeats
-```
-
----
-
-# 27. Example Data
-
-## 27.1 Create Development User
+Development-only seed data:
 
 ```sql
-INSERT INTO users (
+INSERT INTO users
+(
     email,
     password_hash,
-    display_name
+    display_name,
+    role
 )
-VALUES (
-    'dev@example.com',
-    '$2b$12$example-development-password-hash',
-    'Development User'
-)
-RETURNING *;
+VALUES
+(
+    'admin@media-platform.local',
+    '$2b$12$REPLACE_WITH_REAL_BCRYPT_HASH',
+    'Development Admin',
+    'admin'
+);
 ```
 
-The password hash above is only illustrative.
-
-The Node.js authentication service must generate real password hashes using a suitable password hashing algorithm.
+Do not use this password hash in production.
 
 ---
 
-# 28. Create Media Record
+# 50. Example Media Record
 
 ```sql
-INSERT INTO media (
-    user_id,
+INSERT INTO media
+(
+    owner_id,
     title,
     original_filename,
-    mime_type,
-    status
-)
-VALUES (
-    'USER_UUID_HERE',
-    'Demo Video',
-    'demo.mp4',
-    'video/mp4',
-    'uploaded'
-)
-RETURNING id;
-```
-
----
-
-# 29. Create Original Asset
-
-```sql
-INSERT INTO media_assets (
-    media_id,
-    asset_type,
-    bucket_name,
-    object_key,
-    original_filename,
+    media_type,
+    status,
     mime_type,
     size_bytes
 )
-VALUES (
-    'MEDIA_UUID_HERE',
-    'original',
-    'media-platform',
-    'media/MEDIA_UUID_HERE/original/demo.mp4',
+SELECT
+    id,
+    'Demo Video',
     'demo.mp4',
+    'video',
+    'ready',
     'video/mp4',
     104857600
-)
-RETURNING id;
+FROM users
+WHERE email = 'admin@media-platform.local';
 ```
 
 ---
 
-# 30. Create Media Probe Job
+# 51. Example Job
 
 ```sql
-INSERT INTO jobs (
+INSERT INTO jobs
+(
     media_id,
     type,
     status,
     priority,
-    queue_name,
-    idempotency_key
+    max_attempts,
+    input
 )
-VALUES (
-    'MEDIA_UUID_HERE',
-    'media_probe',
+SELECT
+    id,
+    'MEDIA_PROBE',
     'queued',
-    'normal',
-    'media-processing',
-    'media-probe:MEDIA_UUID_HERE'
-)
-RETURNING id;
-```
-
----
-
-# 31. Job Event
-
-When the worker starts processing:
-
-```sql
-INSERT INTO job_events (
-    job_id,
-    event_type,
-    previous_status,
-    new_status,
-    progress,
-    message
-)
-VALUES (
-    'JOB_UUID_HERE',
-    'job_started',
-    'queued',
-    'running',
-    0,
-    'C++ media worker started processing'
-);
-```
-
----
-
-# 32. Job Progress
-
-```sql
-INSERT INTO job_events (
-    job_id,
-    event_type,
-    previous_status,
-    new_status,
-    progress,
-    message
-)
-VALUES (
-    'JOB_UUID_HERE',
-    'progress',
-    'running',
-    'running',
-    50,
-    'Media analysis 50 percent complete'
-);
-```
-
-Then:
-
-```sql
-UPDATE jobs
-SET
-    progress = 50,
-    updated_at = NOW()
-WHERE id = 'JOB_UUID_HERE';
-```
-
----
-
-# 33. Successful Job
-
-```sql
-UPDATE jobs
-SET
-    status = 'succeeded',
-    progress = 100,
-    completed_at = NOW(),
-    updated_at = NOW()
-WHERE id = 'JOB_UUID_HERE';
-```
-
-Record the event:
-
-```sql
-INSERT INTO job_events (
-    job_id,
-    event_type,
-    previous_status,
-    new_status,
-    progress,
-    message
-)
-VALUES (
-    'JOB_UUID_HERE',
-    'job_completed',
-    'running',
-    'succeeded',
     100,
-    'Media probe completed successfully'
-);
+    3,
+    '{"probe": true}'::JSONB
+FROM media
+WHERE original_filename = 'demo.mp4';
 ```
 
 ---
 
-# 34. Media Probe Result
+# 52. Example Processing Flow
 
-```sql
-INSERT INTO processing_results (
-    job_id,
-    media_id,
-    result_type,
-    result
-)
-VALUES (
-    'JOB_UUID_HERE',
-    'MEDIA_UUID_HERE',
-    'metadata',
-    '{
-        "duration_ms": 120000,
-        "width": 1920,
-        "height": 1080,
-        "video_codec": "h264",
-        "audio_codec": "aac",
-        "container": "mp4",
-        "frame_rate": 29.97
-    }'::jsonb
-);
+A real processing operation should create records in approximately this order:
+
+```text
+1. users
+      │
+      ▼
+2. media
+      │
+      ▼
+3. source media_asset
+      │
+      ▼
+4. MEDIA_PROBE job
+      │
+      ▼
+5. job_attempt
+      │
+      ▼
+6. processing_result
+      │
+      ├── metadata update
+      │
+      └── generated assets
+               │
+               ▼
+7. AUDIO_EXTRACT job
+      │
+      ▼
+8. TRANSCRIBE job
+      │
+      ▼
+9. transcript
+      │
+      ▼
+10. transcript_segments
+      │
+      ▼
+11. AI_ANALYSIS job
+      │
+      ▼
+12. ai_insights
 ```
 
 ---
 
-# 35. Transcript Example
+# 53. Job Queue and PostgreSQL
 
-Create transcript:
+The system deliberately separates:
 
-```sql
-INSERT INTO transcripts (
-    media_id,
-    language,
-    model,
-    provider,
-    confidence,
-    full_text
-)
-VALUES (
-    'MEDIA_UUID_HERE',
-    'en',
-    'whisper',
-    'local',
-    0.94,
-    'Hello everyone. Welcome to our media analytics platform.'
-)
-RETURNING id;
+```text
+Redis
+    =
+transport / queue coordination
+
+PostgreSQL
+    =
+persistent state / source of truth
 ```
-
-Create segment:
-
-```sql
-INSERT INTO transcript_segments (
-    transcript_id,
-    segment_index,
-    start_ms,
-    end_ms,
-    text,
-    confidence,
-    speaker
-)
-VALUES (
-    'TRANSCRIPT_UUID_HERE',
-    0,
-    0,
-    3200,
-    'Hello everyone.',
-    0.97,
-    'speaker_0'
-);
-```
-
----
-
-# 36. Detection Example
-
-```sql
-INSERT INTO detections (
-    media_id,
-    detection_type,
-    label,
-    confidence,
-    start_ms,
-    end_ms,
-    bbox_x,
-    bbox_y,
-    bbox_width,
-    bbox_height,
-    tracking_id
-)
-VALUES (
-    'MEDIA_UUID_HERE',
-    'face',
-    'person',
-    0.98,
-    1000,
-    3500,
-    0.25,
-    0.10,
-    0.20,
-    0.35,
-    'track_001'
-);
-```
-
----
-
-# 37. Scene Example
-
-```sql
-INSERT INTO scenes (
-    media_id,
-    scene_index,
-    start_ms,
-    end_ms,
-    confidence,
-    label
-)
-VALUES (
-    'MEDIA_UUID_HERE',
-    0,
-    0,
-    14000,
-    0.91,
-    'introduction'
-);
-```
-
----
-
-# 38. Clip Example
-
-```sql
-INSERT INTO clips (
-    media_id,
-    title,
-    start_ms,
-    end_ms,
-    status
-)
-VALUES (
-    'MEDIA_UUID_HERE',
-    'Introduction Clip',
-    10000,
-    30000,
-    'processing'
-)
-RETURNING id;
-```
-
-After C++ generates the clip, associate the resulting object:
-
-```sql
-UPDATE clips
-SET
-    status = 'ready',
-    asset_id = 'CLIP_ASSET_UUID'
-WHERE id = 'CLIP_UUID_HERE';
-```
-
----
-
-# 39. AI Insight Example
-
-```sql
-INSERT INTO ai_insights (
-    media_id,
-    insight_type,
-    model,
-    provider,
-    confidence,
-    title,
-    content,
-    structured_data
-)
-VALUES (
-    'MEDIA_UUID_HERE',
-    'summary',
-    'local-llm',
-    'local',
-    0.92,
-    'Video Summary',
-    'The video introduces the media analytics platform.',
-    '{
-        "topics": [
-            "media analytics",
-            "video processing",
-            "AI"
-        ],
-        "keywords": [
-            "video",
-            "analytics",
-            "processing"
-        ]
-    }'::jsonb
-);
-```
-
----
-
-# 40. Worker Registration
-
-C++ worker:
-
-```sql
-INSERT INTO workers (
-    worker_name,
-    worker_type,
-    status,
-    hostname,
-    version,
-    capabilities
-)
-VALUES (
-    'cpp-worker-01',
-    'cpp',
-    'online',
-    'localhost',
-    '0.1.0',
-    '{
-        "ffmpeg": true,
-        "video_decode": true,
-        "audio_decode": true,
-        "thumbnail": true,
-        "clip": true
-    }'::jsonb
-)
-RETURNING id;
-```
-
-Python worker:
-
-```sql
-INSERT INTO workers (
-    worker_name,
-    worker_type,
-    status,
-    hostname,
-    version,
-    capabilities
-)
-VALUES (
-    'python-worker-01',
-    'python',
-    'online',
-    'localhost',
-    '0.1.0',
-    '{
-        "transcription": true,
-        "face_detection": true,
-        "sentiment": true,
-        "summarization": true
-    }'::jsonb
-)
-RETURNING id;
-```
-
----
-
-# 41. Worker Heartbeat
-
-```sql
-INSERT INTO worker_heartbeats (
-    worker_id,
-    cpu_percent,
-    memory_bytes,
-    active_jobs
-)
-VALUES (
-    'WORKER_UUID_HERE',
-    42.5,
-    536870912,
-    2
-);
-```
-
-Update worker status:
-
-```sql
-UPDATE workers
-SET
-    status = 'busy',
-    last_heartbeat_at = NOW()
-WHERE id = 'WORKER_UUID_HERE';
-```
-
----
-
-# 42. Detect Stale Workers
-
-Example query:
-
-```sql
-SELECT
-    id,
-    worker_name,
-    worker_type,
-    status,
-    last_heartbeat_at
-FROM workers
-WHERE
-    last_heartbeat_at IS NULL
-    OR last_heartbeat_at < NOW() - INTERVAL '30 seconds';
-```
-
-The application can periodically mark these workers as offline.
-
----
-
-# 43. Job Recovery Query
-
-Suppose a worker crashes while processing a job.
-
-Find stale running jobs:
-
-```sql
-SELECT
-    id,
-    media_id,
-    type,
-    worker_id,
-    started_at,
-    attempt
-FROM jobs
-WHERE
-    status = 'running'
-    AND started_at < NOW() - INTERVAL '10 minutes';
-```
-
-The orchestration service can then:
-
-1. Verify worker health.
-2. Determine whether the job is still active.
-3. Requeue the job.
-4. Increment `attempt`.
-5. Record a `job_events` entry.
-
----
-
-# 44. Queue Claiming Pattern
-
-If PostgreSQL is ever used to claim work directly, use row locking.
 
 Example:
 
+```text
+Node.js
+   │
+   ├── INSERT jobs
+   │
+   ├── INSERT outbox_events
+   │
+   ▼
+PostgreSQL
+   │
+   ▼
+Outbox Publisher
+   │
+   ▼
+Redis
+   │
+   ▼
+C++ Worker
+   │
+   ├── UPDATE jobs
+   ├── INSERT job_attempt
+   ├── INSERT job_events
+   └── INSERT processing_results
+```
+
+---
+
+# 54. Job Leasing
+
+A worker should not simply mark a job as running forever.
+
+The job contains:
+
+```text
+leased_until
+```
+
+Example:
+
+```text
+Job
+status = running
+
+leased_until =
+2026-09-07 22:40:00 UTC
+```
+
+If the worker crashes:
+
+```text
+leased_until < NOW()
+```
+
+the recovery process can identify the abandoned job.
+
+---
+
+# 55. Retry Model
+
+The database supports:
+
+```text
+attempt_count
+max_attempts
+```
+
+Example:
+
+```text
+max_attempts = 3
+
+Attempt 1 → failed
+Attempt 2 → failed
+Attempt 3 → failed
+
+        ↓
+
+dead_letter
+```
+
+Retry policy itself remains application logic because different failures have different retry semantics.
+
+---
+
+# 56. Idempotency
+
+Jobs support:
+
+```text
+idempotency_key
+```
+
+Example:
+
+```text
+media_id = ABC
+idempotency_key = "transcribe-v1-en"
+```
+
+Repeated requests can be detected without creating duplicate processing operations.
+
+---
+
+# 57. Data Retention
+
+Recommended initial retention:
+
+| Data          | Retention                           |
+| ------------- | ----------------------------------- |
+| Users         | Indefinite                          |
+| Sessions      | Until expiry + cleanup              |
+| Media         | User-controlled                     |
+| Media assets  | Until media deletion                |
+| Jobs          | Long-term                           |
+| Job events    | Long-term initially                 |
+| Job attempts  | Long-term                           |
+| Transcripts   | With media                          |
+| Detections    | With media                          |
+| Scenes        | With media                          |
+| Clips         | User-controlled                     |
+| AI insights   | With processing run                 |
+| Audit logs    | Long-term                           |
+| Outbox events | Delete after successful publication |
+
+Production retention can later be changed according to storage requirements.
+
+---
+
+# 58. Data Consistency Rules
+
+## Rule 1
+
+Every job must reference an existing media object.
+
+```text
+jobs.media_id → media.id
+```
+
+## Rule 2
+
+Every transcript belongs to a media object.
+
+```text
+transcripts.media_id → media.id
+```
+
+## Rule 3
+
+Every transcript segment belongs to a transcript.
+
+```text
+transcript_segments.transcript_id
+```
+
+## Rule 4
+
+Every generated asset belongs to a media object.
+
+```text
+media_assets.media_id
+```
+
+## Rule 5
+
+Worker assignment is nullable.
+
+A job may exist before a worker claims it.
+
+## Rule 6
+
+Processing history is append-oriented.
+
+Do not overwrite historical attempts.
+
+---
+
+# 59. Delete Semantics
+
+The schema intentionally distinguishes between relationships.
+
+### Cascade
+
+Used when child data has no meaning without the parent.
+
+Example:
+
+```text
+media
+ └── transcripts
+      └── transcript_segments
+```
+
+Deleting media removes its dependent processing metadata.
+
+### Set NULL
+
+Used when historical data can remain without the referenced entity.
+
+Example:
+
+```text
+job.worker_id
+```
+
+If a worker record is removed, the historical job remains.
+
+### Restrict
+
+Used for ownership.
+
+```text
+media.owner_id
+```
+
+A user should normally be deactivated rather than physically deleted.
+
+---
+
+# 60. Database Transaction Strategy
+
+A media upload should approximately use:
+
+```text
+BEGIN
+
+INSERT media
+
+INSERT source media_asset
+
+INSERT initial processing job
+
+INSERT outbox event
+
+COMMIT
+```
+
+The binary upload itself should normally happen through object storage.
+
+The database transaction records the resulting object reference.
+
+---
+
+# 61. Recommended Database Schemas
+
+Initially, all tables can remain under:
+
+```text
+public
+```
+
+As the project grows, a future structure could be:
+
+```text
+auth
+media
+processing
+analytics
+operations
+audit
+```
+
+For MVP, this separation is unnecessary complexity.
+
+---
+
+# 62. Recommended Migration Structure
+
+After the initial schema is validated, convert the DDL into migrations:
+
+```text
+database/
+├── migrations/
+│   ├── 001_extensions.sql
+│   ├── 002_users.sql
+│   ├── 003_media.sql
+│   ├── 004_workers.sql
+│   ├── 005_jobs.sql
+│   ├── 006_processing.sql
+│   ├── 007_analytics.sql
+│   ├── 008_audit.sql
+│   └── 009_indexes.sql
+│
+├── seeds/
+│   └── development.sql
+│
+└── schema.sql
+```
+
+`schema.sql` should represent the complete database state.
+
+---
+
+# 63. Database Performance Strategy
+
+## High-frequency queries
+
+Indexes prioritize:
+
+```text
+jobs
+media
+job_events
+transcripts
+detections
+workers
+```
+
+The most important queue query is conceptually:
+
 ```sql
-SELECT id
+SELECT *
 FROM jobs
 WHERE status = 'queued'
-ORDER BY
-    CASE priority
-        WHEN 'critical' THEN 1
-        WHEN 'high' THEN 2
-        WHEN 'normal' THEN 3
-        WHEN 'low' THEN 4
-    END,
-    created_at
-FOR UPDATE SKIP LOCKED
+  AND available_at <= NOW()
+ORDER BY priority DESC, available_at ASC
 LIMIT 1;
 ```
 
-However, this platform's primary queue is Redis.
-
-PostgreSQL should remain the persistent source of job state.
+The partial queue index supports this access pattern.
 
 ---
 
-# 45. Transaction Boundary
+# 64. Large Detection Datasets
 
-A job state transition should generally happen inside one transaction.
+Detection tables may become extremely large.
 
-Example:
+For example:
 
-```sql
-BEGIN;
-
-UPDATE jobs
-SET
-    status = 'running',
-    started_at = COALESCE(started_at, NOW()),
-    attempt = attempt + 1,
-    worker_id = 'WORKER_UUID_HERE'
-WHERE id = 'JOB_UUID_HERE'
-  AND status IN ('queued', 'retrying');
-
-INSERT INTO job_events (
-    job_id,
-    event_type,
-    previous_status,
-    new_status,
-    message
-)
-VALUES (
-    'JOB_UUID_HERE',
-    'job_started',
-    'queued',
-    'running',
-    'Worker claimed job'
-);
-
-COMMIT;
+```text
+1 video
+    ↓
+100,000 frames
+    ↓
+5 detections/frame
+    ↓
+500,000 rows
 ```
 
-The actual Node.js/worker implementation should carefully handle concurrent state transitions.
+For very large workloads, partitioning can later be introduced.
+
+Possible strategy:
+
+```text
+detections
+├── partition by media_id
+```
+
+or time-based partitioning.
+
+Do not introduce partitioning prematurely in the MVP.
 
 ---
 
-# 46. Idempotency
+# 65. Transcript Query Strategy
 
-The `jobs.idempotency_key` field prevents duplicate logical jobs.
-
-Example:
+The UI may need:
 
 ```text
-media-probe:<media_id>
+Search transcript
+Jump to timestamp
+Show matching segment
 ```
 
-or:
+The initial implementation uses PostgreSQL text search or indexed application queries.
+
+Future optimization can introduce:
 
 ```text
-transcription:<media_id>:whisper:v1
+GIN index
+PostgreSQL full-text search
+external search engine
 ```
 
-Example:
-
-```sql
-SELECT id
-FROM jobs
-WHERE
-    media_id = 'MEDIA_UUID_HERE'
-    AND idempotency_key = 'media-probe:MEDIA_UUID_HERE';
-```
-
-If the job already exists, the API should normally reuse it rather than creating a duplicate.
+depending on workload.
 
 ---
 
-# 47. JSONB Strategy
+# 66. JSONB Strategy
 
-JSONB is intentionally used for flexible information.
+JSONB should not become a replacement for relational design.
 
-Good JSONB candidates:
+Good:
 
-```text
-FFmpeg metadata
-AI model output
-Worker capabilities
-Detection-specific metadata
-Processing manifests
-Provider-specific response data
+```json
+{
+  "model_version": "v2",
+  "threshold": 0.75,
+  "gpu": false
+}
 ```
 
-Do not put core relational information into JSONB.
-
-Bad example:
+Bad:
 
 ```json
 {
   "user_id": "...",
   "media_id": "...",
-  "status": "ready"
+  "job_id": "..."
 }
 ```
 
-These should remain proper PostgreSQL columns.
-
-Good example:
-
-```json
-{
-  "ffmpeg": {
-    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-    "probe_version": "..."
-  }
-}
-```
+Frequently queried relational attributes should remain proper columns.
 
 ---
 
-# 48. Object Storage Boundary
+# 67. Security Considerations
 
-The database stores:
-
-```text
-bucket_name
-object_key
-mime_type
-size
-checksum
-```
-
-It does **not** store:
-
-```text
-video bytes
-audio bytes
-image bytes
-```
-
-Example:
-
-```text
-PostgreSQL
-
-media_assets
-    |
-    └── object_key
-            |
-            ▼
-Object Storage
-    |
-    └── media/abc/original/video.mp4
-```
-
----
-
-# 49. Media Deletion
-
-Deletion should normally be a two-stage process.
-
-## Stage 1 — Logical deletion
-
-```sql
-UPDATE media
-SET
-    status = 'deleted',
-    deleted_at = NOW()
-WHERE id = 'MEDIA_UUID_HERE';
-```
-
-## Stage 2 — Object cleanup
-
-A background cleanup worker removes the corresponding object-storage objects.
-
-This avoids coupling database deletion to object-storage availability.
-
----
-
-# 50. Data Retention
-
-Suggested initial retention policy:
-
-| Data                 | Retention                       |
-| -------------------- | ------------------------------- |
-| Users                | Indefinite while account exists |
-| Media metadata       | Until deletion                  |
-| Original media       | Until user deletes it           |
-| Generated clips      | Until deleted                   |
-| Job records          | Long-term                       |
-| Job events           | 30–90 days initially            |
-| Worker heartbeats    | 7–30 days                       |
-| Processing manifests | Long-term                       |
-| AI results           | Until media deletion            |
-
-For high-volume production deployments, `job_events` and `worker_heartbeats` can later be partitioned or archived.
-
----
-
-# 51. Performance Considerations
-
-## 51.1 Primary Queries
-
-The schema is optimized around these queries:
-
-```text
-Get user's media
-Get media details
-Get media assets
-Get media processing jobs
-Get current job status
-Get job history
-Get transcript
-Get transcript timeline
-Get detections in time range
-Get scenes
-Get generated clips
-Get AI insights
-Get worker health
-```
-
----
-
-# 52. Timeline Query
-
-Retrieve transcript segments for a time range:
-
-```sql
-SELECT
-    id,
-    start_ms,
-    end_ms,
-    text,
-    speaker,
-    confidence
-FROM transcript_segments
-WHERE
-    transcript_id = 'TRANSCRIPT_UUID_HERE'
-    AND start_ms < 60000
-    AND end_ms > 30000
-ORDER BY start_ms;
-```
-
----
-
-# 53. Detection Timeline Query
-
-```sql
-SELECT
-    id,
-    detection_type,
-    label,
-    confidence,
-    start_ms,
-    end_ms,
-    bbox_x,
-    bbox_y,
-    bbox_width,
-    bbox_height,
-    tracking_id
-FROM detections
-WHERE
-    media_id = 'MEDIA_UUID_HERE'
-    AND start_ms < 60000
-    AND (
-        end_ms IS NULL
-        OR end_ms > 30000
-    )
-ORDER BY start_ms;
-```
-
----
-
-# 54. Current Job Status
-
-```sql
-SELECT
-    id,
-    type,
-    status,
-    progress,
-    attempt,
-    max_attempts,
-    error_code,
-    error_message,
-    created_at,
-    started_at,
-    completed_at
-FROM jobs
-WHERE media_id = 'MEDIA_UUID_HERE'
-ORDER BY created_at;
-```
-
----
-
-# 55. Media Processing Summary
-
-```sql
-SELECT
-    m.id,
-    m.title,
-    m.status,
-    COUNT(j.id) AS total_jobs,
-    COUNT(j.id) FILTER (
-        WHERE j.status = 'succeeded'
-    ) AS completed_jobs,
-    COUNT(j.id) FILTER (
-        WHERE j.status = 'failed'
-    ) AS failed_jobs
-FROM media m
-LEFT JOIN jobs j
-    ON j.media_id = m.id
-WHERE m.id = 'MEDIA_UUID_HERE'
-GROUP BY m.id;
-```
-
----
-
-# 56. Database Concurrency
-
-PostgreSQL provides transactional consistency.
-
-Important operations include:
-
-```text
-Job claiming
-Job state transitions
-Result creation
-Worker assignment
-Media state transitions
-```
-
-These operations should use transactions.
-
-For state transitions, the application should use conditional updates.
-
-Example:
-
-```sql
-UPDATE jobs
-SET status = 'running'
-WHERE id = $1
-AND status = 'queued';
-```
-
-Then inspect affected rows.
-
-If:
-
-```text
-rows = 1
-```
-
-the transition succeeded.
-
-If:
-
-```text
-rows = 0
-```
-
-another worker may have already claimed the job.
-
----
-
-# 57. Preventing Invalid Job States
-
-The application should enforce the job state machine:
-
-```text
-queued
-   │
-   ▼
-running
-   │
-   ├───────────────┐
-   ▼               ▼
-succeeded        failed
-                   │
-                   ▼
-                retrying
-                   │
-                   ▼
-                queued
-```
-
-Cancellation:
-
-```text
-queued ──────► cancelled
-
-running ─────► cancelled
-```
-
-The database stores the state.
-
-The application controls valid transitions.
-
----
-
-# 58. Database vs Redis Responsibility
-
-## PostgreSQL
-
-PostgreSQL stores:
-
-```text
-Permanent state
-Metadata
-Job state
-Processing results
-Users
-Media relationships
-Audit information
-```
-
-## Redis
-
-Redis handles:
-
-```text
-Queue delivery
-Temporary job messages
-Realtime coordination
-Short-lived locks
-Caching
-Pub/Sub or Streams
-```
-
-Redis failure must not destroy the permanent processing history.
-
----
-
-# 59. Database vs Object Storage
-
-## PostgreSQL
-
-Stores:
-
-```text
-metadata
-relationships
-indexes
-status
-timestamps
-results
-references
-```
-
-## Object Storage
-
-Stores:
-
-```text
-MP4
-MOV
-MKV
-WAV
-MP3
-JPEG
-PNG
-VTT
-SRT
-generated clips
-intermediate media
-```
-
----
-
-# 60. ERD
-
-```text
-users
- │
- │ 1:N
- ▼
-media
- │
- ├─────────────── 1:N ──────────────► media_assets
- │
- ├─────────────── 1:N ──────────────► jobs
- │                                      │
- │                                      ├── parent_job_id
- │                                      │
- │                                      ├── 1:N → job_events
- │                                      │
- │                                      ├── 1:N → processing_results
- │                                      │
- │                                      └── 1:N → processing_manifests
- │
- ├─────────────── 1:N ──────────────► processing_results
- │                                      │
- │                                      └── 1:N → processing_artifacts
- │
- ├─────────────── 1:N ──────────────► transcripts
- │                                      │
- │                                      └── 1:N → transcript_segments
- │
- ├─────────────── 1:N ──────────────► detections
- │
- ├─────────────── 1:N ──────────────► scenes
- │
- ├─────────────── 1:N ──────────────► clips
- │                                      │
- │                                      └── N:1 → media_assets
- │
- └─────────────── 1:N ──────────────► ai_insights
-
-
-workers
- │
- └─────────────── 1:N ──────────────► worker_heartbeats
-                                      │
-                                      └── N:1 → jobs
-```
-
----
-
-# 61. Recommended Repository Structure
-
-The database portion of the project should eventually look like:
-
-```text
-database/
-├── migrations/
-│   ├── 001_initial_schema.sql
-│   ├── 002_indexes.sql
-│   ├── 003_job_state_constraints.sql
-│   └── ...
-│
-├── seeds/
-│   └── development.sql
-│
-├── queries/
-│   ├── media.sql
-│   ├── jobs.sql
-│   ├── transcripts.sql
-│   ├── detections.sql
-│   └── workers.sql
-│
-└── README.md
-```
-
-The complete DDL from this document should initially be saved as:
-
-```text
-database/migrations/001_initial_schema.sql
-```
-
----
-
-# 62. Migration Strategy
-
-Do not manually edit an already-applied migration.
-
-For example:
-
-```text
-001_initial_schema.sql
-002_add_job_leases.sql
-003_add_media_tags.sql
-004_add_gpu_metrics.sql
-```
-
-Once migration `001` has been applied, changes should be introduced through new migrations.
-
-This keeps development and production databases reproducible.
-
----
-
-# 63. Seed Data
-
-Development-only seed data should be separate from migrations.
-
-Example:
-
-```text
-database/seeds/development.sql
-```
-
-Never put real credentials into seed files.
-
-Development credentials should use clearly fake values.
-
----
-
-# 64. Backup Strategy
-
-PostgreSQL production deployment should eventually have:
-
-```text
-Automated backups
-+
-Point-in-time recovery
-+
-Backup verification
-+
-Restore testing
-```
-
-Media binaries require a separate object-storage backup/retention strategy.
-
-A PostgreSQL backup alone does not recover the actual video files.
-
----
-
-# 65. Security Model
-
-The database must never expose:
+Sensitive information includes:
 
 ```text
 password_hash
+session token hashes
+IP address
+audit information
 ```
 
-through normal public API responses.
+Applications must:
 
-The API layer should select only required columns.
-
-Example:
-
-```sql
-SELECT
-    id,
-    email,
-    display_name,
-    status,
-    created_at
-FROM users
-WHERE id = $1;
-```
-
-Avoid:
-
-```sql
-SELECT *
-FROM users;
-```
-
-in application-facing queries.
+* never expose password hashes
+* never expose session token hashes
+* restrict database access
+* use encrypted connections in production
+* use least-privilege database roles
+* use parameterized SQL
+* validate uploaded media
+* avoid storing unnecessary personal data
 
 ---
 
-# 66. Database Roles
+# 68. Database Roles
 
-A production installation should eventually use separate PostgreSQL roles.
+Production should use separate roles.
 
 Example:
 
 ```text
-media_api
+media_app
 media_worker
 media_migration
 media_readonly
 ```
 
-The API does not need unrestricted database privileges.
-
-The migration user can have elevated privileges.
-
-Worker services should receive only the permissions they require.
-
----
-
-# 67. Row-Level Security
-
-Row-Level Security is not required for the initial MVP because authorization can be enforced in the Node.js service layer.
-
-However, RLS can be introduced later for stronger tenant isolation.
-
-For example:
+Conceptually:
 
 ```text
-User A
- └── media A
-
-User B
- └── media B
-```
-
-User A must never be able to retrieve User B's media.
-
-The Node.js API should always scope media queries by authenticated user.
-
----
-
-# 68. Important API Query Rule
-
-Never trust a client-provided `user_id`.
-
-Bad:
-
-```sql
-SELECT *
-FROM media
-WHERE user_id = $client_supplied_user_id;
-```
-
-Instead:
-
-```text
-authenticated JWT
-       │
-       ▼
-Node.js authentication middleware
-       │
-       ▼
-authenticated user ID
-       │
-       ▼
-database query
-```
-
-The user identity must come from the authenticated server-side context.
-
----
-
-# 69. Data Flow Mapping
-
-The architecture maps to the database like this:
-
-```text
-React
-  │
-  ▼
-Node API
-  │
-  ├──────────────► users
-  │
-  ├──────────────► media
-  │
-  ├──────────────► media_assets
-  │
-  └──────────────► jobs
-                         │
-                         ▼
-                       Redis
-                         │
-             ┌───────────┴───────────┐
-             ▼                       ▼
-        C++ Worker              Python Worker
-             │                       │
-             └───────────┬───────────┘
-                         │
-                         ▼
-                   processing_results
-                         │
-             ┌───────────┼───────────┐
-             ▼           ▼           ▼
-        transcripts   detections    scenes
-             │
-             ▼
-      transcript_segments
-```
-
----
-
-# 70. C++ Integration Mapping
-
-The C++ media engine primarily interacts with:
-
-```text
-jobs
-media
-media_assets
-processing_results
-processing_artifacts
-processing_manifests
-```
-
-Example:
-
-```text
-Node
- │
- ▼
-Redis
- │
- ▼
-C++ Worker
- │
- ├── FFmpeg
- │
- ├── Decode
- │
- ├── Analyze
- │
- ├── Thumbnail
- │
- └── Clip
- │
- ▼
-Object Storage
- │
- ▼
-PostgreSQL
-```
-
-The C++ process should not directly become responsible for authentication or user management.
-
----
-
-# 71. Python Integration Mapping
-
-Python workers primarily interact with:
-
-```text
-jobs
-media_assets
-processing_results
-processing_artifacts
-transcripts
-transcript_segments
-detections
-ai_insights
-```
-
-Example:
-
-```text
-C++ Worker
-    │
-    ▼
-audio.wav
-    │
-    ▼
-Object Storage
-    │
-    ▼
-Python Worker
-    │
-    ├── transcription
-    ├── NLP
-    ├── sentiment
-    └── AI summary
-    │
-    ▼
-PostgreSQL
-```
-
----
-
-# 72. Node.js Integration Mapping
-
-Node.js is responsible for:
-
-```text
-users
-media
-media_assets
-jobs
-job_events
-workers
-```
-
-It should orchestrate the system rather than perform heavy media processing.
-
----
-
-# 73. React Integration Mapping
-
-React primarily consumes:
-
-```text
-media
-media_assets
-jobs
-job_events
-processing_results
-transcripts
-detections
-scenes
-clips
-ai_insights
-```
-
-Example UI:
-
-```text
-Media Studio
-│
-├── Video Player
-│
-├── Timeline
-│     ├── Transcript segments
-│     ├── Scene boundaries
-│     └── Detection markers
-│
-├── Processing Status
-│
-├── Generated Clips
-│
-└── AI Insights
-```
-
----
-
-# 74. Database State vs UI State
-
-The database stores authoritative processing state.
-
-Example:
-
-```text
-jobs.progress = 73
-```
-
-React may display:
-
-```text
-Processing... 73%
-```
-
-WebSocket events provide low-latency updates.
-
-If the WebSocket connection is lost, React can request the current state from PostgreSQL through the API.
-
-Therefore:
-
-```text
-WebSocket = realtime transport
-
-PostgreSQL = persistent truth
-```
-
----
-
-# 75. Production Scaling Considerations
-
-The initial schema is suitable for moderate workloads.
-
-At larger scale:
-
-```text
-job_events
-worker_heartbeats
-detections
-transcript_segments
-```
-
-may become very large.
-
-Possible future optimizations:
-
-```text
-Table partitioning
-Time-based archival
-Cold storage
-Materialized views
-Read replicas
-Dedicated analytics database
-ClickHouse
-Elasticsearch/OpenSearch
-```
-
-These should not be introduced prematurely.
-
----
-
-# 76. Why We Normalize Transcript Segments
-
-An entire transcript could technically be stored as:
-
-```json
-{
-  "segments": [...]
-}
-```
-
-inside JSONB.
-
-We intentionally avoid this.
-
-Reasons:
-
-* Efficient timeline queries
-* Pagination
-* Indexing
-* Speaker filtering
-* Full-text search later
-* Incremental processing
-* Easier updates
-* Better relational integrity
-
----
-
-# 77. Why Detections Are Normalized
-
-Computer vision models may generate millions of detections.
-
-The normalized table allows queries such as:
-
-```text
-Find all faces between 120 and 180 seconds.
-```
-
-or:
-
-```text
-Find every detection belonging to tracking ID track_123.
-```
-
-without loading an enormous JSON document.
-
----
-
-# 78. Why Processing Results and Artifacts Are Separate
-
-A result describes:
-
-```text
-WHAT was produced.
-```
-
-An artifact describes:
-
-```text
-WHERE the produced file exists.
-```
-
-Example:
-
-```text
-processing_results
-
-{
-    "type": "thumbnail"
-}
-
-        │
-        ▼
-
-processing_artifacts
-
-bucket = media-platform
-key = media/123/thumb.jpg
-```
-
-This separation allows metadata-only results and file-producing results to coexist.
-
----
-
-# 79. Initial MVP Tables
-
-Although the full schema is defined now, the MVP may initially use only:
-
-```text
-users
-media
-media_assets
-jobs
-job_events
-processing_results
-processing_artifacts
-transcripts
-transcript_segments
-workers
-worker_heartbeats
-```
-
-Later stages activate:
-
-```text
-detections
-scenes
-clips
-ai_insights
-processing_manifests
-```
-
-This keeps implementation manageable while preserving the final architecture.
-
----
-
-# 80. Acceptance Criteria
-
-Step 3 is complete when:
-
-* [ ] PostgreSQL database can be created.
-* [ ] Migration executes without errors.
-* [ ] All required tables exist.
-* [ ] All enum types exist.
-* [ ] Foreign keys work.
-* [ ] Unique constraints work.
-* [ ] Check constraints reject invalid data.
-* [ ] Indexes exist.
-* [ ] `updated_at` triggers work.
-* [ ] Development seed data can be inserted.
-* [ ] Media records can be created.
-* [ ] Media assets can be linked.
-* [ ] Jobs can be created.
-* [ ] Job events can be recorded.
-* [ ] Processing results can be stored.
-* [ ] Transcript segments can be queried by timeline.
-* [ ] Detection records can be stored.
-* [ ] Scenes can be stored.
-* [ ] Clips can be linked to assets.
-* [ ] AI insights can be stored.
-* [ ] Workers can register.
-* [ ] Worker heartbeats can be recorded.
-* [ ] Stale workers can be detected.
-
----
-
-# 81. Final Database Architecture
-
-```text
-                    PostgreSQL
-                         │
-       ┌─────────────────┼──────────────────┐
-       │                 │                  │
-       ▼                 ▼                  ▼
-     Users             Media              Workers
-                         │                  │
-             ┌───────────┼───────────┐     │
-             │           │           │     │
-             ▼           ▼           ▼     ▼
-          Assets       Jobs       Results Heartbeats
-                         │           │
-                         │      ┌────┼─────┬─────┐
-                         │      │    │     │     │
-                         ▼      ▼    ▼     ▼     ▼
-                      Events  Text  CV   Scenes  AI
-                               │
-                               ▼
-                            Segments
-```
-
-The broader platform becomes:
-
-```text
-                     ┌─────────────────┐
-                     │ React Frontend  │
-                     └────────┬────────┘
-                              │
-                              ▼
-                     ┌─────────────────┐
-                     │ Node.js API     │
-                     └───────┬─────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-        ┌───────────┐  ┌───────────┐  ┌──────────────┐
-        │PostgreSQL │  │   Redis   │  │Object Storage│
-        └───────────┘  └─────┬─────┘  └──────┬───────┘
-                             │               │
-                    ┌────────┴────────┐      │
-                    ▼                 ▼      │
-              ┌──────────┐      ┌──────────┐ │
-              │C++ Worker│      │  Python  │ │
-              │ + FFmpeg │      │  Worker  │ │
-              └────┬─────┘      └────┬─────┘ │
-                   │                 │        │
-                   └─────────────────┴────────┘
-                             │
-                             ▼
-                       Media Results
-```
-
----
-
-# 82. Step 3 Summary
-
-The database now provides a durable foundation for the entire distributed media-processing system.
-
-The important separation is:
-
-```text
-PostgreSQL
-    ↓
-System state + metadata + relationships
-
-Redis
-    ↓
-Asynchronous job delivery
-
-Object Storage
-    ↓
-Large binary media
-
-C++
-    ↓
-High-performance media processing
-
-Python
-    ↓
-AI/ML processing
-
 Node.js
     ↓
-API + orchestration + authentication
+media_app
 
-React
+C++ / Python
     ↓
-Media Studio UI
+media_worker
+
+Migration system
+    ↓
+media_migration
+
+Analytics
+    ↓
+media_readonly
 ```
 
-This keeps each technology responsible for the workload it is best suited to handle.
+The application should not run migrations using its normal runtime credentials.
 
-The next implementation step is to create the PostgreSQL container/database, execute `001_initial_schema.sql`, verify the schema, and then connect the Node.js backend to it.
+---
+
+# 69. Backup Strategy
+
+Recommended:
+
+```text
+PostgreSQL
+    │
+    ├── continuous WAL/archive
+    ├── daily backup
+    └── periodic restore test
+```
+
+Object storage must have its own backup/versioning strategy.
+
+Database backup alone does not recover the actual media files.
+
+---
+
+# 70. Recovery Strategy
+
+After PostgreSQL recovery:
+
+```text
+jobs
+   │
+   ▼
+find queued/running jobs
+   │
+   ▼
+reconcile Redis
+   │
+   ▼
+resume processing
+```
+
+Because PostgreSQL is the source of truth, the queue can be rebuilt.
+
+---
+
+# 71. Example End-to-End Dataset
+
+A processed video might produce:
+
+```text
+users
+  1 row
+
+media
+  1 row
+
+media_assets
+  5 rows
+
+jobs
+  7 rows
+
+job_attempts
+  8 rows
+
+job_events
+  30+ rows
+
+processing_results
+  7 rows
+
+transcripts
+  1 row
+
+transcript_segments
+  120 rows
+
+detections
+  8,500 rows
+
+scenes
+  42 rows
+
+clips
+  5 rows
+
+ai_insights
+  4 rows
+```
+
+---
+
+# 72. Final Data Architecture
+
+```text
+                         PostgreSQL
+                              │
+         ┌────────────────────┼────────────────────┐
+         │                    │                    │
+       Auth                Media               Operations
+         │                    │                    │
+     ┌───┴───┐         ┌──────┴──────┐       ┌────┴─────┐
+     │       │         │             │       │          │
+   Users  Sessions   Assets         Jobs   Workers    Audit
+                                   │
+                     ┌─────────────┼─────────────┐
+                     │             │             │
+                 Attempts       Events      Dependencies
+                     │
+                     ▼
+                Processing
+                     │
+          ┌──────────┼──────────┐
+          │          │          │
+      Transcript  Detection   Scenes
+          │
+      Segments
+          │
+          └──────────┐
+                     ▼
+                 AI Insights
+                     │
+                     ▼
+                   Clips
+```
+
+---
+
+# 73. Final Storage Architecture
+
+```text
+                   Application
+                       │
+             ┌─────────┴─────────┐
+             │                   │
+             ▼                   ▼
+        PostgreSQL          Object Storage
+             │                   │
+             │                   ├── original.mp4
+             │                   ├── proxy.mp4
+             │                   ├── audio.wav
+             │                   ├── thumbnail.jpg
+             │                   ├── waveform.json
+             │                   ├── clip.mp4
+             │                   └── subtitles.vtt
+             │
+             ├── metadata
+             ├── jobs
+             ├── results
+             ├── transcript
+             ├── detections
+             └── references
+```
+
+---
+
+# 74. Definition of Done
+
+The database implementation is considered complete when:
+
+* [ ] PostgreSQL database can be created from a clean installation
+* [ ] `schema.sql` executes without manual table creation
+* [ ] all foreign keys are valid
+* [ ] all constraints are enforced
+* [ ] UUID primary keys work
+* [ ] timestamps use `TIMESTAMPTZ`
+* [ ] media metadata is separated from binary storage
+* [ ] jobs support retries
+* [ ] jobs support leasing
+* [ ] job attempts are persisted
+* [ ] job events are persisted
+* [ ] job dependencies are supported
+* [ ] transcripts are supported
+* [ ] transcript segments are supported
+* [ ] detections are supported
+* [ ] scenes are supported
+* [ ] clips are supported
+* [ ] AI insights are supported
+* [ ] workers can register
+* [ ] audit events can be recorded
+* [ ] outbox events can be persisted
+* [ ] indexes exist for major query paths
+* [ ] updated timestamps are automatically maintained
+* [ ] database backup/restore has been tested
+
+---
+
+# 75. Next Implementation Step
+
+After this data model, the project should move to:
+
+```text
+03 Data Model
+      │
+      ▼
+04 API Reference
+      │
+      ▼
+05 Roadmap & Phases
+      │
+      ▼
+06 Development Guide
+      │
+      ▼
+07 Security
+      │
+      ▼
+08 Gap Analysis
+      │
+      ▼
+09 Testing Strategy
+      │
+      ▼
+10 Glossary
+```
+
+The next major implementation artifact after the documentation phase should be:
+
+```text
+database/
+├── schema.sql
+├── migrations/
+├── seeds/
+└── README.md
+```
+
+Then the Node.js service can connect to PostgreSQL and implement the first real API flow:
+
+```text
+POST /api/v1/media
+        │
+        ▼
+Create media record
+        │
+        ▼
+Create upload metadata
+        │
+        ▼
+Create processing job
+        │
+        ▼
+Publish queue event
+```
+
+This establishes the first complete vertical slice of the platform.
