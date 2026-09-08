@@ -10,6 +10,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-database-336791)](#data-layer)
 [![Redis](https://img.shields.io/badge/Redis-queue-red)](#job-processing)
 [![Docker](https://img.shields.io/badge/Docker-containerized-2496ED)](#deployment)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee\&logoColor=white)](https://buymeacoffee.com/adarsh12kumar)
 
 ---
 
